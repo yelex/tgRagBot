@@ -11,28 +11,29 @@ from langchain_chroma import Chroma
 from langchain.chains import create_retrieval_chain
 from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain_core.prompts import ChatPromptTemplate
-from langchain.memory import ConversationBufferMemory
+from langchain_core.documents import Document
 
-from utils.utils import load_text
+from interfaces import mysql_interface
 
 load_dotenv()
-
 
 class FlowerLogic:
     def __init__(self):
         self.AUTHORIZATION_KEY = os.getenv('AUTHORIZATION_KEY')
         self.PATH_MESSAGES = os.getenv('PATH_MESSAGES')
-        self.PATH_BOUQUETS = os.getenv('PATH_BOUQUETS')
-        self.PATH_SYSTEM_PROMPT = os.getenv('PATH_SYSTEM_PROMPT')
+        self.PATH_BOUQUETS = 'bouquets.json'
+        self.PERSIST_DIR = 'chroma_db'
         self.rag_chain = None
         self.bouquets_info = None
         self.bouquets_data = None
-        self.system_prompt = None
-        self.user_memories = {}  # сюда будем складывать memory для каждого пользователя
+        self.embeddings = None
+
+        self.user_memories = {}  # user_id -> conversation memory
+
         self.initialize_components()
 
     def load_bouquets_data(self):
-        """Загружает и обрабатывает данные о букетах из JSON-файла"""
+        """Загружает данные о букетах из JSON"""
         with open(self.PATH_BOUQUETS, 'r', encoding='utf-8') as f:
             data = json.load(f)
 
@@ -42,78 +43,84 @@ class FlowerLogic:
             bouquets_info.append(
                 f"Название: {bouquet['Название']}, Цена: {bouquet['Цена']} руб."
             )
-
         self.bouquets_info = "\n".join(bouquets_info)
-        return self.bouquets_info, self.bouquets_data
-
-    def set_system_prompt(self):
-        self.system_prompt = load_text(self.PATH_SYSTEM_PROMPT)
 
     def initialize_components(self):
-        """Инициализация компонентов языковой модели"""
-        # Загрузка и подготовка документов с переписками
-        loader = TextLoader(self.PATH_MESSAGES)
-        documents = loader.load()
-        text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=1000,
-            chunk_overlap=200,
-        )
-        documents = text_splitter.split_documents(documents)
-
-        # Загрузка данных о букетах
-        self.load_bouquets_data()
-
-        # Устанавливаем системный промпт
-        self.set_system_prompt()
-
-        # Создаем ретривер
-        embeddings = GigaChatEmbeddings(
+        """Создает или загружает векторное хранилище"""
+        print("🌸 Инициализация компонентов...")
+        self.embeddings = GigaChatEmbeddings(
             credentials=self.AUTHORIZATION_KEY, verify_ssl_certs=False
         )
 
-        db = Chroma.from_documents(
-            documents,
-            embeddings,
-            client_settings=Settings(anonymized_telemetry=False),
-        )
-        retriever = db.as_retriever()
+        # Загружаем данные о букетах
+        self.load_bouquets_data()
 
-        # Создаём шаблон промпта
+        if os.path.exists(self.PERSIST_DIR) and os.listdir(self.PERSIST_DIR):
+            print("🔄 Найдена сохранённая Chroma-база. Загружаем...")
+            self.db = Chroma(
+                persist_directory=self.PERSIST_DIR,
+                embedding_function=self.embeddings,
+                client_settings=Settings(anonymized_telemetry=False),
+            )
+        else:
+            print("⚡️ Индексируем переписки впервые...")
+            loader = TextLoader(self.PATH_MESSAGES)
+            documents = loader.load()
+
+            splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+            chunks = splitter.split_documents(documents)
+
+            self.db = Chroma.from_documents(
+                chunks,
+                self.embeddings,
+                persist_directory=self.PERSIST_DIR,
+                client_settings=Settings(anonymized_telemetry=False),
+            )
+            self.db.persist()
+            print("✅ Индексация завершена и сохранена.")
+
+        retriever = self.db.as_retriever()
+
+        # Шаблон для RAG
+        system_prompt_text = self.load_system_prompt()
 
         prompt = ChatPromptTemplate.from_messages([
-            ("system",
-             self.system_prompt
-             ),
+            ("system", system_prompt_text),
             ("human", "{input}")
         ])
 
-        # Создаём цепочку обработки документов
-        llm = GigaChat(verify_ssl_certs=False, credentials=self.AUTHORIZATION_KEY, model='GigaChat-2-Max')
+        llm = GigaChat(verify_ssl_certs=False, credentials=self.AUTHORIZATION_KEY)
+
         question_answer_chain = create_stuff_documents_chain(
             llm=llm,
             prompt=prompt
         )
 
-        # Создаём RAG-цепочку
         self.rag_chain = create_retrieval_chain(
             retriever=retriever,
             combine_docs_chain=question_answer_chain
         )
 
+        print("🌸 RAG-цепочка готова!")
+
+    def load_system_prompt(self):
+        with open('system_prompt.txt', 'r', encoding='utf-8') as f:
+            return f.read()
+
     def get_user_memory(self, user_id):
         if user_id not in self.user_memories:
-            self.user_memories[user_id] = ConversationBufferMemory(
-                return_messages=True
-            )
+            from langchain.memory import ConversationBufferMemory
+            self.user_memories[user_id] = ConversationBufferMemory(return_messages=True)
         return self.user_memories[user_id]
 
     def get_bouquet_recommendation(self, user_input: str, user_id: int) -> str:
-        memory = self.get_user_memory(user_id)
+        """Обрабатывает запрос пользователя"""
+        # Сохраняем в MySQL
+        mysql_interface.save_message(user_id, user_input)
 
-        # добавляем текущее сообщение в память
+        memory = self.get_user_memory(user_id)
         memory.chat_memory.add_user_message(user_input)
 
-        # делаем запрос с историей
         past_messages = "\n".join(
             [f"{m.type}: {m.content}" for m in memory.chat_memory.messages]
         )
@@ -123,21 +130,13 @@ class FlowerLogic:
             "bouquets_info": self.bouquets_info,
         })
 
-        # сохраняем ответ в память
         memory.chat_memory.add_ai_message(result["answer"])
-
         return result["answer"]
 
     def filter_bouquets_by_price(self, max_price: float):
-        """Фильтрует букеты по максимальной цене"""
-        filtered = []
-        for bouquet in self.bouquets_data:
-            if bouquet['Цена'] <= max_price:
-                filtered.append(bouquet)
-        return filtered
+        return [b for b in self.bouquets_data if b['Цена'] <= max_price]
 
     def format_bouquet_message(self, bouquet):
-        """Форматирует информацию о букете для сообщения"""
         return (
             f"💐 {bouquet['Название']}\n"
             f"💰 Цена: {bouquet['Цена']} руб.\n"
@@ -145,7 +144,6 @@ class FlowerLogic:
         )
 
     def create_price_ranges(self):
-        """Создает список ценовых диапазонов"""
         return [
             ("До 5 000 руб.", "5000"),
             ("5 000-10 000 руб.", "10000"),
@@ -153,3 +151,17 @@ class FlowerLogic:
             ("15 000-20 000 руб.", "20000"),
             ("Свыше 20 000 руб.", "20000+")
         ]
+
+    def add_new_messages_to_index(self):
+        """Обновляет Chroma из MySQL"""
+        print("⚡️ Загружаем все переписки из MySQL...")
+        all_texts = mysql_interface.load_all_messages()
+        print(f"✅ Найдено сообщений: {len(all_texts)}")
+
+        documents = [Document(page_content=txt) for txt in all_texts]
+        splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+        chunks = splitter.split_documents(documents)
+
+        self.db.add_documents(chunks)
+        self.db.persist()
+        print("✅ Chroma-индекс обновлён!")
