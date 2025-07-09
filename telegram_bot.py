@@ -122,7 +122,7 @@ class TelegramBot:
         logger.info(f"Получено сообщение от {user.id} ({user.username or 'без username'}): {user_input}")
 
         try:
-            response = self.flower_logic.get_bouquet_recommendation(user_input)
+            response = self.flower_logic.get_bouquet_recommendation(user_input, user_id=user.id)
             await update.message.reply_text(response)
             logger.info("Ответ успешно отправлен пользователю")
         except Exception as e:
