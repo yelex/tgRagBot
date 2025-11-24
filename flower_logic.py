@@ -1,7 +1,6 @@
 import os
 import json
 from dotenv import load_dotenv
-
 from langchain_gigachat.chat_models import GigaChat
 from langchain_community.document_loaders import TextLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
@@ -12,7 +11,6 @@ from langchain.chains import create_retrieval_chain
 from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.documents import Document
-
 from interfaces import mysql_interface
 
 load_dotenv()
@@ -21,15 +19,13 @@ class FlowerLogic:
     def __init__(self):
         self.AUTHORIZATION_KEY = os.getenv('AUTHORIZATION_KEY')
         self.PATH_MESSAGES = os.getenv('PATH_MESSAGES')
-        self.PATH_BOUQUETS = 'bouquets.json'
+        self.PATH_BOUQUETS = os.getenv('PATH_BOUQUETS')
         self.PERSIST_DIR = 'chroma_db'
         self.rag_chain = None
         self.bouquets_info = None
         self.bouquets_data = None
         self.embeddings = None
-
         self.user_memories = {}  # user_id -> conversation memory
-
         self.initialize_components()
 
     def load_bouquets_data(self):
@@ -55,12 +51,19 @@ class FlowerLogic:
         # Загружаем данные о букетах
         self.load_bouquets_data()
 
+        # Инициализация Chroma
+        client_settings = Settings(
+            anonymized_telemetry=False,
+            persist_directory=self.PERSIST_DIR,
+            is_persistent=True
+        )
+
         if os.path.exists(self.PERSIST_DIR) and os.listdir(self.PERSIST_DIR):
             print("🔄 Найдена сохранённая Chroma-база. Загружаем...")
             self.db = Chroma(
                 persist_directory=self.PERSIST_DIR,
                 embedding_function=self.embeddings,
-                client_settings=Settings(anonymized_telemetry=False),
+                client_settings=client_settings
             )
         else:
             print("⚡️ Индексируем переписки впервые...")
@@ -71,13 +74,12 @@ class FlowerLogic:
             chunks = splitter.split_documents(documents)
 
             self.db = Chroma.from_documents(
-                chunks,
-                self.embeddings,
+                documents=chunks,
+                embedding=self.embeddings,
                 persist_directory=self.PERSIST_DIR,
-                client_settings=Settings(anonymized_telemetry=False),
+                client_settings=client_settings
             )
-            self.db.persist()
-            print("✅ Индексация завершена и сохранена.")
+            print("✅ Индексация завершена.")
 
         retriever = self.db.as_retriever()
 
@@ -89,7 +91,9 @@ class FlowerLogic:
             ("human", "{input}")
         ])
 
-        llm = GigaChat(verify_ssl_certs=False, credentials=self.AUTHORIZATION_KEY)
+        llm = GigaChat(verify_ssl_certs=False,
+                       credentials=self.AUTHORIZATION_KEY,
+                       model='GigaChat-2-Max')
 
         question_answer_chain = create_stuff_documents_chain(
             llm=llm,
@@ -104,7 +108,7 @@ class FlowerLogic:
         print("🌸 RAG-цепочка готова!")
 
     def load_system_prompt(self):
-        with open('system_prompt.txt', 'r', encoding='utf-8') as f:
+        with open(os.getenv('PATH_SYSTEM_PROMPT'), 'r', encoding='utf-8') as f:
             return f.read()
 
     def get_user_memory(self, user_id):
@@ -162,6 +166,15 @@ class FlowerLogic:
         splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
         chunks = splitter.split_documents(documents)
 
-        self.db.add_documents(chunks)
-        self.db.persist()
+        # Создаем новую коллекцию с обновленными документами
+        self.db = Chroma.from_documents(
+            documents=chunks,
+            embedding=self.embeddings,
+            persist_directory=self.PERSIST_DIR,
+            client_settings=Settings(
+                anonymized_telemetry=False,
+                persist_directory=self.PERSIST_DIR,
+                is_persistent=True
+            )
+        )
         print("✅ Chroma-индекс обновлён!")
