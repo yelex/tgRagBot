@@ -140,22 +140,6 @@ class FlowerLogic:
     def filter_bouquets_by_price(self, max_price: float):
         return [b for b in self.bouquets_data if b['Цена'] <= max_price]
 
-    def format_bouquet_message(self, bouquet):
-        return (
-            f"💐 {bouquet['Название']}\n"
-            f"💰 Цена: {bouquet['Цена']} руб.\n"
-            f"🔗 [Ссылка на букет]({bouquet['Ссылка']})"
-        )
-
-    def create_price_ranges(self):
-        return [
-            ("До 5 000 руб.", "5000"),
-            ("5 000-10 000 руб.", "10000"),
-            ("10 000-15 000 руб.", "15000"),
-            ("15 000-20 000 руб.", "20000"),
-            ("Свыше 20 000 руб.", "20000+")
-        ]
-
     def add_new_messages_to_index(self):
         """Обновляет Chroma из MySQL"""
         print("⚡️ Загружаем все переписки из MySQL...")
@@ -178,3 +162,21 @@ class FlowerLogic:
             )
         )
         print("✅ Chroma-индекс обновлён!")
+
+
+def format_bouquet_message(bouquet):
+    return (
+        f"💐 {bouquet['Название']}\n"
+        f"💰 Цена: {bouquet['Цена']} руб.\n"
+        f"🔗 [Ссылка на букет]({bouquet['Ссылка']})"
+    )
+
+
+def create_price_ranges():
+    return [
+        ("До 5 000 руб.", "5000"),
+        ("5 000-10 000 руб.", "10000"),
+        ("10 000-15 000 руб.", "15000"),
+        ("15 000-20 000 руб.", "20000"),
+        ("Свыше 20 000 руб.", "20000+")
+    ]
