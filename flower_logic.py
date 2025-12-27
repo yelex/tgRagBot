@@ -1,6 +1,16 @@
 import os
 import json
+import shutil
+import sys
 from dotenv import load_dotenv
+
+# Используем pysqlite3 для более новой версии SQLite (решает проблемы с ChromaDB)
+try:
+    import pysqlite3
+    sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
+except ImportError:
+    # Если pysqlite3 не установлен, используем стандартный sqlite3
+    pass
 from langchain_gigachat.chat_models import GigaChat
 from langchain_community.document_loaders import TextLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
@@ -58,15 +68,15 @@ class FlowerLogic:
             is_persistent=True
         )
 
-        if os.path.exists(self.PERSIST_DIR) and os.listdir(self.PERSIST_DIR):
-            print("🔄 Найдена сохранённая Chroma-база. Загружаем...")
-            self.db = Chroma(
-                persist_directory=self.PERSIST_DIR,
-                embedding_function=self.embeddings,
-                client_settings=client_settings
-            )
-        else:
-            print("⚡️ Индексируем переписки впервые...")
+        # Функция для безопасного создания базы данных
+        def create_fresh_db():
+            """Создает новую базу данных с нуля"""
+            # Полностью очищаем директорию
+            if os.path.exists(self.PERSIST_DIR):
+                shutil.rmtree(self.PERSIST_DIR)
+            os.makedirs(self.PERSIST_DIR, exist_ok=True)
+            
+            print("⚡️ Индексируем переписки...")
             loader = TextLoader(self.PATH_MESSAGES)
             documents = loader.load()
 
@@ -80,6 +90,44 @@ class FlowerLogic:
                 client_settings=client_settings
             )
             print("✅ Индексация завершена.")
+
+        # Пытаемся загрузить существующую базу
+        # Проверяем наличие файла chroma.sqlite3 как индикатора существующей базы
+        sqlite_file = os.path.join(self.PERSIST_DIR, "chroma.sqlite3")
+        has_existing_db = os.path.exists(sqlite_file) and os.path.getsize(sqlite_file) > 0
+        
+        if has_existing_db:
+            print("🔄 Найдена сохранённая Chroma-база. Загружаем...")
+            db_loaded = False
+            
+            try:
+                # Пытаемся загрузить базу
+                self.db = Chroma(
+                    persist_directory=self.PERSIST_DIR,
+                    embedding_function=self.embeddings,
+                    client_settings=client_settings
+                )
+                # Проверяем целостность базы, пытаясь выполнить простой запрос
+                try:
+                    retriever = self.db.as_retriever()
+                    # Пробуем выполнить простой поиск для проверки работоспособности
+                    _ = retriever.get_relevant_documents("test")
+                    db_loaded = True
+                    print("✅ База данных успешно загружена.")
+                except Exception as e:
+                    print(f"⚠️ База данных повреждена (ошибка при проверке): {e}")
+                    db_loaded = False
+            except BaseException as e:
+                # Перехватываем все исключения, включая системные и панику Rust
+                print(f"⚠️ Ошибка при загрузке Chroma-базы: {type(e).__name__}: {e}")
+                db_loaded = False
+            
+            if not db_loaded:
+                print("🗑️ Удаляем повреждённую базу и создаём новую...")
+                create_fresh_db()
+        else:
+            print("⚡️ База данных не найдена или пуста. Создаём новую...")
+            create_fresh_db()
 
         retriever = self.db.as_retriever()
 
