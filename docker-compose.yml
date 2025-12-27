@@ -1,0 +1,61 @@
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: tg_rag_bot_mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-rootpassword}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-flower_bot}
+      MYSQL_USER: ${MYSQL_USER:-flower_user}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-flower_password}
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "${MYSQL_PORT:-3307}:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - bot_network  # <-- Добавьте эту строку
+
+  bot:
+    build: .
+    container_name: tg_rag_bot
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      # Telegram
+      TELEGRAM_TOKEN: ${TELEGRAM_TOKEN}
+      
+      # GigaChat
+      AUTHORIZATION_KEY: ${AUTHORIZATION_KEY}
+      
+      # Paths
+      PATH_MESSAGES: ${PATH_MESSAGES:-/app/data/test.txt}
+      PATH_BOUQUETS: ${PATH_BOUQUETS:-/app/data/bouquets.json}
+      PATH_SYSTEM_PROMPT: ${PATH_SYSTEM_PROMPT:-/app/prompts/system_prompt.txt}
+      
+      # MySQL
+      MYSQL_HOST: ${MYSQL_HOST:-mysql}
+      MYSQL_USER: ${MYSQL_USER:-flower_user}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-flower_password}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-flower_bot}
+    volumes:
+      - ./chroma_db:/app/chroma_db
+      - ./data:/app/data
+      - ./prompts:/app/prompts
+      - ./flower_bot.log:/app/flower_bot.log
+    networks:
+      - bot_network
+
+volumes:
+  mysql_data:
+
+networks:
+  bot_network:
+    driver: bridge

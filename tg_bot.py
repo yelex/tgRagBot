@@ -47,15 +47,15 @@ class TelegramBot:
         self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
         logger.info("Обработчики команд зарегистрированы")
 
-    def _get_conversation_history(self, chat_id: int) -> List[Dict[str, str]]:
-        return self.conversation_history.get(chat_id, [])
+    def _get_conversation_history(self, user_id: int) -> List[Dict[str, str]]:
+        return self.conversation_history.get(user_id, [])
 
-    def _add_to_history(self, chat_id: int, role: str, message: str):
-        if chat_id not in self.conversation_history:
-            self.conversation_history[chat_id] = []
-        if len(self.conversation_history[chat_id]) >= 10:
-            self.conversation_history[chat_id] = self.conversation_history[chat_id][-9:]
-        self.conversation_history[chat_id].append({"role": role, "content": message})
+    def _add_to_history(self, user_id: int, role: str, message: str):
+        if user_id not in self.conversation_history:
+            self.conversation_history[user_id] = []
+        if len(self.conversation_history[user_id]) >= 10:
+            self.conversation_history[user_id] = self.conversation_history[user_id][-9:]
+        self.conversation_history[user_id].append({"role": role, "content": message})
 
     def _convert_history_to_messages(self, history: List[Dict[str, str]]) -> List[BaseMessage]:
         messages = []
@@ -84,24 +84,23 @@ class TelegramBot:
         return messages
 
     def _escape_markdown(self, text: str) -> str:
-        escape_chars = r'_*[]()~`>#+-=|{}.!'
-        return ''.join(f'\\{char}' if char in escape_chars else char for char in text)
+        # В обычном Markdown нужно экранировать только специальные символы в определенных контекстах
+        # Для простоты оставляем функцию, но она не будет использоваться активно
+        return text
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        chat_id = update.effective_chat.id
-        self.conversation_history[chat_id] = []
+        user_id = update.effective_user.id
+        self.conversation_history[user_id] = []
 
-        welcome_text = """
-🌸 *Добро пожаловать в цветочный магазин!* 🌸
+        welcome_text = """🌸 *Добро пожаловать в цветочный магазин!* 🌸
 
 Я помогу вам подобрать идеальный букет. Вы можете:
 - Написать ваш запрос (например, _Ищу розы до 10000 рублей_)
 - Выбрать ценовой диапазон
-- Попросить рекомендацию
-"""
+- Попросить рекомендацию"""
 
-        self._add_to_history(chat_id, "assistant", welcome_text)
-        await update.message.reply_text(self._escape_markdown(welcome_text), parse_mode="MarkdownV2")
+        self._add_to_history(user_id, "assistant", welcome_text)
+        await update.message.reply_text(welcome_text, parse_mode="Markdown")
         await self.show_price_ranges(update, context)
 
     async def show_price_ranges(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -111,9 +110,9 @@ class TelegramBot:
 
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
-            text=r"*Выберите ваш бюджет:*",
+            text="*Выберите ваш бюджет:*",
             reply_markup=reply_markup,
-            parse_mode="MarkdownV2"
+            parse_mode="Markdown"
         )
         logger.info(f"Пользователю {update.effective_user.id} показаны ценовые диапазоны")
 
@@ -134,67 +133,67 @@ class TelegramBot:
             return
 
         for bouquet in bouquets[:3]:
-            message = self._escape_markdown(format_bouquet_message(bouquet))
+            message = format_bouquet_message(bouquet)
             await context.bot.send_message(
                 chat_id=query.message.chat_id,
                 text=message,
-                parse_mode="MarkdownV2",
+                parse_mode="Markdown",
                 disable_web_page_preview=True
             )
 
         if len(bouquets) > 3:
             await context.bot.send_message(
                 chat_id=query.message.chat_id,
-                text=r"Показано 3 из {} вариантов\. Уточните запрос для более точного подбора\.".format(len(bouquets)),
-                parse_mode="MarkdownV2"
+                text=f"Показано 3 из {len(bouquets)} вариантов. Уточните запрос для более точного подбора.",
+                parse_mode="Markdown"
             )
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        chat_id = update.effective_chat.id
+        user_id = update.effective_user.id
         user_input = update.message.text
-        self._add_to_history(chat_id, "user", user_input)
-        logger.info(f"Получено сообщение от {chat_id}: {user_input}")
+        self._add_to_history(user_id, "user", user_input)
+        logger.info(f"Получено сообщение от {user_id}: {user_input}")
 
         try:
-            raw_history = self._get_conversation_history(chat_id)
+            raw_history = self._get_conversation_history(user_id)
             converted_history = self._convert_history_to_messages(raw_history)
 
             logger.debug(f"История перед отправкой в GigaChat: {[type(m) for m in converted_history]}")
 
+            
             response = self.flower_logic.get_bouquet_recommendation(
                 user_input=user_input,
+                user_id=user_id,
                 conversation_history=converted_history
             )
 
-            self._add_to_history(chat_id, "assistant", response)
+            self._add_to_history(user_id, "assistant", response)
 
             await update.message.reply_text(
-                self._escape_markdown(response),
-                parse_mode="MarkdownV2"
+                response,
+                parse_mode="Markdown"
             )
-            logger.info(f"Отправлен ответ пользователю {chat_id}")
+            logger.info(f"Отправлен ответ пользователю {user_id}")
 
         except Exception as e:
             logger.error(f"Ошибка при обработке сообщения: {e}")
             await update.message.reply_text(
-                self._escape_markdown("Произошла ошибка при обработке запроса. Попробуйте позже."),
-                parse_mode="MarkdownV2"
+                "Произошла ошибка при обработке запроса. Попробуйте позже.",
+                parse_mode="Markdown"
             )
 
     async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        help_text = self._escape_markdown(r"""
-📌 *Как пользоваться ботом:*
+        help_text = """📌 *Как пользоваться ботом:*
 
-1\. Напишите что вы ищете \(например: _розы до 10000 рублей_ или _пионы для девушки_\)
-2\. Или выберите ценовой диапазон
-3\. Бот предложит вам подходящие варианты
+1. Напишите что вы ищете (например: _розы до 10000 рублей_ или _пионы для девушки_)
+2. Или выберите ценовой диапазон
+3. Бот предложит вам подходящие варианты
 
 *Доступные команды:*
-/start \- начать диалог
-/help \- показать эту справку
-/prices \- показать ценовые диапазоны
-""")
-        await update.message.reply_text(help_text, parse_mode="MarkdownV2")
+/start - начать диалог
+/help - показать эту справку
+/prices - показать ценовые диапазоны"""
+        await update.message.reply_text(help_text, parse_mode="Markdown")
         logger.info(f"Пользователь {update.effective_user.id} запросил помощь")
 
     def run(self):

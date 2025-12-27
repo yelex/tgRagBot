@@ -117,24 +117,43 @@ class FlowerLogic:
             self.user_memories[user_id] = ConversationBufferMemory(return_messages=True)
         return self.user_memories[user_id]
 
-    def get_bouquet_recommendation(self, user_input: str, user_id: int) -> str:
+    def get_bouquet_recommendation(self, user_input: str, user_id: int = None, conversation_history=None) -> str:
         """Обрабатывает запрос пользователя"""
-        # Сохраняем в MySQL
-        mysql_interface.save_message(user_id, user_input)
+        # Сохраняем в MySQL, если user_id передан
+        if user_id is not None:
+            mysql_interface.save_message(user_id, user_input)
 
-        memory = self.get_user_memory(user_id)
-        memory.chat_memory.add_user_message(user_input)
+        # Используем переданную историю или внутреннюю память
+        if conversation_history is not None:
+            # Формируем строку из переданной истории
+            message_parts = []
+            for m in conversation_history:
+                msg_type = "human" if "Human" in m.__class__.__name__ else "ai"
+                message_parts.append(f"{msg_type}: {m.content}")
+            past_messages = "\n".join(message_parts)
+            input_text = f"{past_messages}\n\nПоследнее сообщение пользователя: {user_input}" if past_messages else user_input
+        else:
+            # Используем внутреннюю память (требует user_id)
+            if user_id is None:
+                raise ValueError("user_id required when conversation_history is not provided")
+            memory = self.get_user_memory(user_id)
+            memory.chat_memory.add_user_message(user_input)
 
-        past_messages = "\n".join(
-            [f"{m.type}: {m.content}" for m in memory.chat_memory.messages]
-        )
+            past_messages = "\n".join(
+                [f"{m.type}: {m.content}" for m in memory.chat_memory.messages]
+            )
+            input_text = f"{past_messages}\n\nПоследнее сообщение пользователя: {user_input}"
 
         result = self.rag_chain.invoke({
-            "input": f"{past_messages}\n\nПоследнее сообщение пользователя: {user_input}",
+            "input": input_text,
             "bouquets_info": self.bouquets_info,
         })
 
-        memory.chat_memory.add_ai_message(result["answer"])
+        # Сохраняем ответ в память, если используем внутреннюю память
+        if conversation_history is None and user_id is not None:
+            memory = self.get_user_memory(user_id)
+            memory.chat_memory.add_ai_message(result["answer"])
+
         return result["answer"]
 
     def filter_bouquets_by_price(self, max_price: float):
