@@ -5,6 +5,9 @@ WORKDIR /app
 # Установка системных зависимостей
 RUN apt-get update && apt-get install -y \
     gcc \
+    g++ \
+    make \
+    libsqlite3-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Копирование requirements и установка зависимостей

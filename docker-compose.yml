@@ -39,6 +39,8 @@ services:
       PATH_MESSAGES: ${PATH_MESSAGES:-/app/data/test.txt}
       PATH_BOUQUETS: ${PATH_BOUQUETS:-/app/data/bouquets.json}
       PATH_SYSTEM_PROMPT: ${PATH_SYSTEM_PROMPT:-/app/prompts/system_prompt.txt}
+      # Python
+      PYTHONUNBUFFERED: 1
       
       # MySQL
       MYSQL_HOST: ${MYSQL_HOST:-mysql}
