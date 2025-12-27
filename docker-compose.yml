@@ -43,7 +43,7 @@ services:
       - ./chroma_db:/app/chroma_db
       - ./data:/app/data
       - ./prompts:/app/prompts
-      - ./flower_bot.log:/app/flower_bot.log
+      - ./logs:/app/logs
     networks:
       - bot_network
 

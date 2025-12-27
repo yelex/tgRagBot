@@ -20,7 +20,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler("flower_bot.log"),
+        logging.FileHandler("./logs/flower_bot.log"),
         logging.StreamHandler()
     ]
 )
