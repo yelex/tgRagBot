@@ -1,46 +1,36 @@
-import os
 import json
-import shutil
-import sys
-from dotenv import load_dotenv
+import os
+import re
+from typing import Any, Dict, List, Literal, Optional, TypedDict
 
-# Используем pysqlite3 для более новой версии SQLite (решает проблемы с ChromaDB)
-try:
-    import pysqlite3
-    sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
-except ImportError:
-    # Если pysqlite3 не установлен, используем стандартный sqlite3
-    pass
-from langchain_gigachat.chat_models import GigaChat
-from langchain_community.document_loaders import TextLoader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from chromadb.config import Settings
-from langchain_gigachat.embeddings.gigachat import GigaChatEmbeddings
-from langchain_chroma import Chroma
-from langchain.chains import create_retrieval_chain
-from langchain.chains.combine_documents import create_stuff_documents_chain
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.documents import Document
+from dotenv import load_dotenv
+from langgraph.graph import END, START, StateGraph
+
 from interfaces import mysql_interface
 
 load_dotenv()
 
+class AgentState(TypedDict):
+    user_input: str
+    user_id: Optional[int]
+    conversation_history: List[Dict[str, str]]
+    bouquets_data: List[Dict[str, Any]]
+    intent: Literal["greet", "catalog", "recommend", "chosen_by_name", "unknown"]
+    entities: Dict[str, Any]
+    response: str
+
+
 class FlowerLogic:
     def __init__(self):
-        self.AUTHORIZATION_KEY = os.getenv('AUTHORIZATION_KEY')
-        self.PATH_MESSAGES = os.getenv('PATH_MESSAGES')
-        self.PATH_BOUQUETS = os.getenv('PATH_BOUQUETS')
-        self.PERSIST_DIR = 'chroma_db'
-        self.rag_chain = None
-        self.bouquets_info = None
-        self.bouquets_data = None
-        self.embeddings = None
-        self.user_memories = {}  # user_id -> conversation memory
+        self.PATH_BOUQUETS = os.getenv("PATH_BOUQUETS")
+        self.bouquets_info: str = ""
+        self.bouquets_data: List[Dict[str, Any]] = []
+        self.graph = None
         self.initialize_components()
 
     def load_bouquets_data(self):
-        """Загружает данные о букетах из JSON"""
-        with open(self.PATH_BOUQUETS, 'r', encoding='utf-8') as f:
+        """Загружает данные о букетах из JSON."""
+        with open(self.PATH_BOUQUETS, "r", encoding="utf-8") as f:
             data = json.load(f)
 
         self.bouquets_data = data
@@ -52,183 +42,172 @@ class FlowerLogic:
         self.bouquets_info = "\n".join(bouquets_info)
 
     def initialize_components(self):
-        """Создает или загружает векторное хранилище"""
-        print("🌸 Инициализация компонентов...")
-        self.embeddings = GigaChatEmbeddings(
-            credentials=self.AUTHORIZATION_KEY, verify_ssl_certs=False
-        )
-
-        # Загружаем данные о букетах
+        """Инициализация минимального LangGraph-агента без RAG."""
+        print("🌸 Инициализация LangGraph-агента...")
         self.load_bouquets_data()
+        self.graph = self._build_graph()
+        print("✅ LangGraph-агент готов!")
 
-        # Инициализация Chroma
-        client_settings = Settings(
-            anonymized_telemetry=False,
-            persist_directory=self.PERSIST_DIR,
-            is_persistent=True
+    def _build_graph(self):
+        graph_builder = StateGraph(AgentState)
+        graph_builder.add_node("nlu", self._nlu_node)
+        graph_builder.add_node("greet", self._greet_node)
+        graph_builder.add_node("offer", self._offer_node)
+
+        graph_builder.add_edge(START, "nlu")
+        graph_builder.add_conditional_edges(
+            "nlu",
+            self._route_from_nlu,
+            {
+                "greet": "greet",
+                "offer": "offer",
+            },
         )
+        graph_builder.add_edge("greet", END)
+        graph_builder.add_edge("offer", END)
 
-        # Функция для безопасного создания базы данных
-        def create_fresh_db():
-            """Создает новую базу данных с нуля"""
-            # Полностью очищаем директорию
-            if os.path.exists(self.PERSIST_DIR):
-                shutil.rmtree(self.PERSIST_DIR)
-            os.makedirs(self.PERSIST_DIR, exist_ok=True)
-            
-            print("⚡️ Индексируем переписки...")
-            loader = TextLoader(self.PATH_MESSAGES)
-            documents = loader.load()
+        return graph_builder.compile()
 
-            splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-            chunks = splitter.split_documents(documents)
+    def _route_from_nlu(self, state: AgentState) -> str:
+        if state["intent"] == "greet":
+            return "greet"
+        return "offer"
 
-            self.db = Chroma.from_documents(
-                documents=chunks,
-                embedding=self.embeddings,
-                persist_directory=self.PERSIST_DIR,
-                client_settings=client_settings
-            )
-            print("✅ Индексация завершена.")
+    def _extract_budget(self, user_input: str) -> Optional[float]:
+        clean_text = user_input.lower().replace(" ", "")
+        matches = re.findall(r"\d+(?:[.,]\d+)?", clean_text)
+        if not matches:
+            return None
+        try:
+            return float(matches[0].replace(",", "."))
+        except ValueError:
+            return None
 
-        # Пытаемся загрузить существующую базу
-        # Проверяем наличие файла chroma.sqlite3 как индикатора существующей базы
-        sqlite_file = os.path.join(self.PERSIST_DIR, "chroma.sqlite3")
-        has_existing_db = os.path.exists(sqlite_file) and os.path.getsize(sqlite_file) > 0
-        
-        if has_existing_db:
-            print("🔄 Найдена сохранённая Chroma-база. Загружаем...")
-            db_loaded = False
-            
-            try:
-                # Пытаемся загрузить базу
-                self.db = Chroma(
-                    persist_directory=self.PERSIST_DIR,
-                    embedding_function=self.embeddings,
-                    client_settings=client_settings
-                )
-                # Проверяем целостность базы, пытаясь выполнить простой запрос
-                try:
-                    retriever = self.db.as_retriever()
-                    # Пробуем выполнить простой поиск для проверки работоспособности
-                    _ = retriever.get_relevant_documents("test")
-                    db_loaded = True
-                    print("✅ База данных успешно загружена.")
-                except Exception as e:
-                    print(f"⚠️ База данных повреждена (ошибка при проверке): {e}")
-                    db_loaded = False
-            except BaseException as e:
-                # Перехватываем все исключения, включая системные и панику Rust
-                print(f"⚠️ Ошибка при загрузке Chroma-базы: {type(e).__name__}: {e}")
-                db_loaded = False
-            
-            if not db_loaded:
-                print("🗑️ Удаляем повреждённую базу и создаём новую...")
-                create_fresh_db()
+    def _nlu_node(self, state: AgentState) -> AgentState:
+        text = state["user_input"].lower()
+        intent: AgentState["intent"] = "unknown"
+        entities: Dict[str, Any] = {}
+
+        greeting_markers = ("привет", "здравствуйте", "добрый", "hello", "hi")
+        if any(marker in text for marker in greeting_markers):
+            intent = "greet"
+        elif "каталог" in text or "все букеты" in text or "покажи все" in text:
+            intent = "catalog"
         else:
-            print("⚡️ База данных не найдена или пуста. Создаём новую...")
-            create_fresh_db()
+            normalized = text
+            for bouquet in state["bouquets_data"]:
+                name = bouquet["Название"].lower()
+                if name in normalized:
+                    intent = "chosen_by_name"
+                    entities["name_query"] = name
+                    break
 
-        retriever = self.db.as_retriever()
+            if intent == "unknown":
+                budget = self._extract_budget(text)
+                if budget is not None:
+                    intent = "recommend"
+                    entities["max_price"] = budget
+                elif any(token in text for token in ("букет", "цвет", "роза", "пион")):
+                    intent = "recommend"
 
-        # Шаблон для RAG
-        system_prompt_text = self.load_system_prompt()
+        state["intent"] = intent
+        state["entities"] = entities
+        return state
 
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", system_prompt_text),
-            ("human", "{input}")
-        ])
-
-        llm = GigaChat(verify_ssl_certs=False,
-                       credentials=self.AUTHORIZATION_KEY,
-                       model='GigaChat-2-Max')
-
-        question_answer_chain = create_stuff_documents_chain(
-            llm=llm,
-            prompt=prompt
+    def _greet_node(self, state: AgentState) -> AgentState:
+        state["response"] = (
+            "Здравствуйте! Помогу подобрать букет. "
+            "Напишите бюджет или пожелания, например: "
+            "'Нужен букет до 10000'."
         )
+        return state
 
-        self.rag_chain = create_retrieval_chain(
-            retriever=retriever,
-            combine_docs_chain=question_answer_chain
+    def _format_short_offer(self, bouquets: List[Dict[str, Any]]) -> str:
+        lines = ["Подобрал варианты:"]
+        for bouquet in bouquets[:3]:
+            lines.append(
+                f"- {bouquet['Название']} — {int(bouquet['Цена'])} руб.\n"
+                f"  {bouquet['Ссылка']}"
+            )
+        return "\n".join(lines)
+
+    def _offer_node(self, state: AgentState) -> AgentState:
+        intent = state["intent"]
+        entities = state["entities"]
+        bouquets = state["bouquets_data"]
+
+        if intent == "catalog":
+            sorted_bouquets = sorted(bouquets, key=lambda b: b["Цена"])
+            state["response"] = self._format_short_offer(sorted_bouquets)
+            return state
+
+        if intent == "chosen_by_name":
+            query = entities.get("name_query", "")
+            found = [b for b in bouquets if query in b["Название"].lower()]
+            if found:
+                state["response"] = self._format_short_offer(found)
+            else:
+                state["response"] = (
+                    "Не нашёл букет по точному названию. "
+                    "Могу подобрать 2-3 варианта по бюджету."
+                )
+            return state
+
+        if intent == "recommend":
+            max_price = entities.get("max_price")
+            if max_price is not None:
+                filtered = [b for b in bouquets if b["Цена"] <= max_price]
+                if not filtered:
+                    state["response"] = (
+                        f"В бюджете до {int(max_price)} руб. вариантов не нашёл. "
+                        "Могу показать ближайшие по цене."
+                    )
+                    cheapest = sorted(bouquets, key=lambda b: b["Цена"])[:3]
+                    state["response"] += "\n\n" + self._format_short_offer(cheapest)
+                    return state
+
+                filtered = sorted(filtered, key=lambda b: b["Цена"], reverse=True)
+                state["response"] = self._format_short_offer(filtered)
+                return state
+
+            top_items = sorted(bouquets, key=lambda b: b["Цена"])[:3]
+            state["response"] = self._format_short_offer(top_items)
+            return state
+
+        state["response"] = (
+            "Уточните, какой бюджет или какие цветы хотите. "
+            "Например: 'Пионы до 15000'."
         )
+        return state
 
-        print("🌸 RAG-цепочка готова!")
-
-    def load_system_prompt(self):
-        with open(os.getenv('PATH_SYSTEM_PROMPT'), 'r', encoding='utf-8') as f:
-            return f.read()
-
-    def get_user_memory(self, user_id):
-        if user_id not in self.user_memories:
-            from langchain.memory import ConversationBufferMemory
-            self.user_memories[user_id] = ConversationBufferMemory(return_messages=True)
-        return self.user_memories[user_id]
-
-    def get_bouquet_recommendation(self, user_input: str, user_id: int = None, conversation_history=None) -> str:
-        """Обрабатывает запрос пользователя"""
-        # Сохраняем в MySQL, если user_id передан
+    def get_bouquet_recommendation(
+        self,
+        user_input: str,
+        user_id: Optional[int] = None,
+        conversation_history: Optional[List[Dict[str, str]]] = None,
+    ) -> str:
+        """Обрабатывает запрос пользователя через LangGraph."""
         if user_id is not None:
             mysql_interface.save_message(user_id, user_input)
+        graph_input: AgentState = {
+            "user_input": user_input,
+            "user_id": user_id,
+            "conversation_history": conversation_history or [],
+            "bouquets_data": self.bouquets_data,
+            "intent": "unknown",
+            "entities": {},
+            "response": "",
+        }
 
-        # Используем переданную историю или внутреннюю память
-        if conversation_history is not None:
-            # Формируем строку из переданной истории
-            message_parts = []
-            for m in conversation_history:
-                msg_type = "human" if "Human" in m.__class__.__name__ else "ai"
-                message_parts.append(f"{msg_type}: {m.content}")
-            past_messages = "\n".join(message_parts)
-            input_text = f"{past_messages}\n\nПоследнее сообщение пользователя: {user_input}" if past_messages else user_input
-        else:
-            # Используем внутреннюю память (требует user_id)
-            if user_id is None:
-                raise ValueError("user_id required when conversation_history is not provided")
-            memory = self.get_user_memory(user_id)
-            memory.chat_memory.add_user_message(user_input)
-
-            past_messages = "\n".join(
-                [f"{m.type}: {m.content}" for m in memory.chat_memory.messages]
-            )
-            input_text = f"{past_messages}\n\nПоследнее сообщение пользователя: {user_input}"
-
-        result = self.rag_chain.invoke({
-            "input": input_text,
-            "bouquets_info": self.bouquets_info,
-        })
-
-        # Сохраняем ответ в память, если используем внутреннюю память
-        if conversation_history is None and user_id is not None:
-            memory = self.get_user_memory(user_id)
-            memory.chat_memory.add_ai_message(result["answer"])
-
-        return result["answer"]
+        result = self.graph.invoke(graph_input)
+        return result["response"]
 
     def filter_bouquets_by_price(self, max_price: float):
         return [b for b in self.bouquets_data if b['Цена'] <= max_price]
 
     def add_new_messages_to_index(self):
-        """Обновляет Chroma из MySQL"""
-        print("⚡️ Загружаем все переписки из MySQL...")
-        all_texts = mysql_interface.load_all_messages()
-        print(f"✅ Найдено сообщений: {len(all_texts)}")
-
-        documents = [Document(page_content=txt) for txt in all_texts]
-        splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-        chunks = splitter.split_documents(documents)
-
-        # Создаем новую коллекцию с обновленными документами
-        self.db = Chroma.from_documents(
-            documents=chunks,
-            embedding=self.embeddings,
-            persist_directory=self.PERSIST_DIR,
-            client_settings=Settings(
-                anonymized_telemetry=False,
-                persist_directory=self.PERSIST_DIR,
-                is_persistent=True
-            )
-        )
-        print("✅ Chroma-индекс обновлён!")
+        """Совместимость со старым API: RAG отключен, индексация не требуется."""
+        print("ℹ️ RAG отключен. add_new_messages_to_index пропущен.")
 
 
 def format_bouquet_message(bouquet):

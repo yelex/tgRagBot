@@ -13,14 +13,13 @@ from telegram.ext import (
 )
 
 from flower_logic import FlowerLogic, create_price_ranges, format_bouquet_message
-from langchain.schema import HumanMessage, AIMessage, BaseMessage
 
 # Настройка логгера
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler("./logs/flower_bot.log"),
+        logging.FileHandler("./flower_bot.log"),
         logging.StreamHandler()
     ]
 )
@@ -56,32 +55,6 @@ class TelegramBot:
         if len(self.conversation_history[user_id]) >= 10:
             self.conversation_history[user_id] = self.conversation_history[user_id][-9:]
         self.conversation_history[user_id].append({"role": role, "content": message})
-
-    def _convert_history_to_messages(self, history: List[Dict[str, str]]) -> List[BaseMessage]:
-        messages = []
-
-        if not isinstance(history, list):
-            logger.error(f"_convert_history_to_messages: history не список: {type(history)}")
-            return messages
-
-        for entry in history:
-            if not isinstance(entry, dict):
-                logger.warning(f"_convert_history_to_messages: элемент не словарь: {entry}")
-                continue
-
-            role = entry.get("role")
-            content = entry.get("content")
-
-            if not isinstance(content, str):
-                logger.warning(f"_convert_history_to_messages: content не строка: {content}")
-                continue
-
-            if role == "user":
-                messages.append(HumanMessage(content=content))
-            elif role == "assistant":
-                messages.append(AIMessage(content=content))
-
-        return messages
 
     def _escape_markdown(self, text: str) -> str:
         # В обычном Markdown нужно экранировать только специальные символы в определенных контекстах
@@ -156,15 +129,10 @@ class TelegramBot:
 
         try:
             raw_history = self._get_conversation_history(user_id)
-            converted_history = self._convert_history_to_messages(raw_history)
-
-            logger.debug(f"История перед отправкой в GigaChat: {[type(m) for m in converted_history]}")
-
-            
             response = self.flower_logic.get_bouquet_recommendation(
                 user_input=user_input,
                 user_id=user_id,
-                conversation_history=converted_history
+                conversation_history=raw_history
             )
 
             self._add_to_history(user_id, "assistant", response)
