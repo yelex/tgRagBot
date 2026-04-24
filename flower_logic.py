@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import re
 from typing import Any, Dict, List, Literal, Optional, TypedDict
@@ -9,10 +10,12 @@ from langgraph.graph import END, START, StateGraph
 from interfaces import mysql_interface
 
 load_dotenv()
+logger = logging.getLogger(__name__)
 
 class AgentState(TypedDict):
     user_input: str
     user_id: Optional[int]
+    user_name: Optional[str]
     conversation_history: List[Dict[str, str]]
     bouquets_data: List[Dict[str, Any]]
     intent: Literal["greet", "catalog", "recommend", "chosen_by_name", "unknown"]
@@ -68,9 +71,19 @@ class FlowerLogic:
 
         return graph_builder.compile()
 
+    def _user_context(self, state: AgentState) -> str:
+        return f"user_id={state.get('user_id')} user_name={state.get('user_name')}"
+
     def _route_from_nlu(self, state: AgentState) -> str:
+        logger.info(
+            "Agent route decision: intent=%s %s",
+            state["intent"],
+            self._user_context(state),
+        )
         if state["intent"] == "greet":
+            logger.info("Agent transition: nlu -> greet %s", self._user_context(state))
             return "greet"
+        logger.info("Agent transition: nlu -> offer %s", self._user_context(state))
         return "offer"
 
     def _extract_budget(self, user_input: str) -> Optional[float]:
@@ -84,6 +97,7 @@ class FlowerLogic:
             return None
 
     def _nlu_node(self, state: AgentState) -> AgentState:
+        logger.info("Agent node enter: nlu %s", self._user_context(state))
         text = state["user_input"].lower()
         intent: AgentState["intent"] = "unknown"
         entities: Dict[str, Any] = {}
@@ -112,14 +126,22 @@ class FlowerLogic:
 
         state["intent"] = intent
         state["entities"] = entities
+        logger.info(
+            "Agent node exit: nlu, intent=%s, entities=%s %s",
+            intent,
+            entities,
+            self._user_context(state),
+        )
         return state
 
     def _greet_node(self, state: AgentState) -> AgentState:
+        logger.info("Agent node enter: greet %s", self._user_context(state))
         state["response"] = (
             "Здравствуйте! Помогу подобрать букет. "
             "Напишите бюджет или пожелания, например: "
             "'Нужен букет до 10000'."
         )
+        logger.info("Agent node exit: greet %s", self._user_context(state))
         return state
 
     def _format_short_offer(self, bouquets: List[Dict[str, Any]]) -> str:
@@ -132,6 +154,11 @@ class FlowerLogic:
         return "\n".join(lines)
 
     def _offer_node(self, state: AgentState) -> AgentState:
+        logger.info(
+            "Agent node enter: offer, intent=%s %s",
+            state["intent"],
+            self._user_context(state),
+        )
         intent = state["intent"]
         entities = state["entities"]
         bouquets = state["bouquets_data"]
@@ -139,6 +166,7 @@ class FlowerLogic:
         if intent == "catalog":
             sorted_bouquets = sorted(bouquets, key=lambda b: b["Цена"])
             state["response"] = self._format_short_offer(sorted_bouquets)
+            logger.info("Agent node exit: offer, branch=catalog %s", self._user_context(state))
             return state
 
         if intent == "chosen_by_name":
@@ -151,6 +179,11 @@ class FlowerLogic:
                     "Не нашёл букет по точному названию. "
                     "Могу подобрать 2-3 варианта по бюджету."
                 )
+            logger.info(
+                "Agent node exit: offer, branch=chosen_by_name, found=%s %s",
+                bool(found),
+                self._user_context(state),
+            )
             return state
 
         if intent == "recommend":
@@ -164,26 +197,41 @@ class FlowerLogic:
                     )
                     cheapest = sorted(bouquets, key=lambda b: b["Цена"])[:3]
                     state["response"] += "\n\n" + self._format_short_offer(cheapest)
+                    logger.info(
+                        "Agent node exit: offer, branch=recommend, within_budget=0 %s",
+                        self._user_context(state),
+                    )
                     return state
 
                 filtered = sorted(filtered, key=lambda b: b["Цена"], reverse=True)
                 state["response"] = self._format_short_offer(filtered)
+                logger.info(
+                    "Agent node exit: offer, branch=recommend, within_budget=%s %s",
+                    len(filtered),
+                    self._user_context(state),
+                )
                 return state
 
             top_items = sorted(bouquets, key=lambda b: b["Цена"])[:3]
             state["response"] = self._format_short_offer(top_items)
+            logger.info(
+                "Agent node exit: offer, branch=recommend, fallback=cheapest %s",
+                self._user_context(state),
+            )
             return state
 
         state["response"] = (
             "Уточните, какой бюджет или какие цветы хотите. "
             "Например: 'Пионы до 15000'."
         )
+        logger.info("Agent node exit: offer %s", self._user_context(state))
         return state
 
     def get_bouquet_recommendation(
         self,
         user_input: str,
         user_id: Optional[int] = None,
+        user_name: Optional[str] = None,
         conversation_history: Optional[List[Dict[str, str]]] = None,
     ) -> str:
         """Обрабатывает запрос пользователя через LangGraph."""
@@ -192,6 +240,7 @@ class FlowerLogic:
         graph_input: AgentState = {
             "user_input": user_input,
             "user_id": user_id,
+            "user_name": user_name,
             "conversation_history": conversation_history or [],
             "bouquets_data": self.bouquets_data,
             "intent": "unknown",

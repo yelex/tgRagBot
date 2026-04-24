@@ -123,15 +123,21 @@ class TelegramBot:
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
+        user_name = (
+            update.effective_user.username
+            or update.effective_user.full_name
+            or update.effective_user.first_name
+        )
         user_input = update.message.text
         self._add_to_history(user_id, "user", user_input)
-        logger.info(f"Получено сообщение от {user_id}: {user_input}")
+        logger.info(f"Получено сообщение от {user_id} ({user_name}): {user_input}")
 
         try:
             raw_history = self._get_conversation_history(user_id)
             response = self.flower_logic.get_bouquet_recommendation(
                 user_input=user_input,
                 user_id=user_id,
+                user_name=user_name,
                 conversation_history=raw_history
             )
 
