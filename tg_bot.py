@@ -1,5 +1,6 @@
 import os
 import logging
+import asyncio
 from typing import Dict, List
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -32,13 +33,28 @@ TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 class TelegramBot:
     def __init__(self):
         self.flower_logic = FlowerLogic()
-        self.application = Application.builder().token(TELEGRAM_TOKEN).build()
+        self.application = None
         self.conversation_history: Dict[int, List[Dict[str, str]]] = {}
-
-        self.register_handlers()
         logger.info("Бот инициализирован")
 
+    async def setup_application(self):
+        """Асинхронная инициализация и настройка приложения бота"""
+        # Создаем Application
+        self.application = Application.builder().token(TELEGRAM_TOKEN).build()
+        
+        # Асинхронная инициализация бота
+        await self.application.initialize()
+        
+        # Регистрируем обработчики
+        self.register_handlers()
+        logger.info("Приложение бота настроено и инициализировано")
+
     def register_handlers(self):
+        """Регистрация обработчиков команд"""
+        if not self.application:
+            logger.error("Application не инициализировано")
+            return
+            
         self.application.add_handler(CommandHandler("start", self.start))
         self.application.add_handler(CommandHandler("help", self.help_command))
         self.application.add_handler(CommandHandler("prices", self.show_price_ranges))
@@ -55,11 +71,6 @@ class TelegramBot:
         if len(self.conversation_history[user_id]) >= 10:
             self.conversation_history[user_id] = self.conversation_history[user_id][-9:]
         self.conversation_history[user_id].append({"role": role, "content": message})
-
-    def _escape_markdown(self, text: str) -> str:
-        # В обычном Markdown нужно экранировать только специальные символы в определенных контекстах
-        # Для простоты оставляем функцию, но она не будет использоваться активно
-        return text
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
@@ -97,7 +108,13 @@ class TelegramBot:
 
         logger.info(f"Пользователь {user_id} выбрал диапазон: {selected_range}")
 
-        max_price = float(selected_range.split('_')[1].replace('+', ''))
+        # Извлекаем максимальную цену из callback_data
+        price_part = selected_range.split('_')[1]
+        if '+' in price_part:
+            max_price = float('inf')
+        else:
+            max_price = float(price_part)
+
         bouquets = self.flower_logic.filter_bouquets_by_price(max_price)
 
         if not bouquets:
@@ -107,16 +124,14 @@ class TelegramBot:
 
         for bouquet in bouquets[:3]:
             message = format_bouquet_message(bouquet)
-            await context.bot.send_message(
-                chat_id=query.message.chat_id,
+            await query.message.reply_text(
                 text=message,
                 parse_mode="Markdown",
                 disable_web_page_preview=True
             )
 
         if len(bouquets) > 3:
-            await context.bot.send_message(
-                chat_id=query.message.chat_id,
+            await query.message.reply_text(
                 text=f"Показано 3 из {len(bouquets)} вариантов. Уточните запрос для более точного подбора.",
                 parse_mode="Markdown"
             )
@@ -171,14 +186,31 @@ class TelegramBot:
         logger.info(f"Пользователь {update.effective_user.id} запросил помощь")
 
     def run(self):
+        """Запуск бота"""
         logger.info("Запуск бота...")
-        self.application.run_polling()
+        
+        # Создаем и запускаем event loop
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        try:
+            # Асинхронно настраиваем приложение
+            loop.run_until_complete(self.setup_application())
+            
+            if not self.application:
+                logger.critical("Не удалось настроить приложение бота")
+                return
+                
+            # Запускаем polling
+            self.application.run_polling()
+        except Exception as e:
+            logger.critical(f"Критическая ошибка при запуске бота: {e}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            loop.close()
 
 
 if __name__ == '__main__':
-    try:
-        bot = TelegramBot()
-        logger.info("Бот успешно запущен")
-        bot.run()
-    except Exception as e:
-        logger.critical(f"Критическая ошибка при запуске бота: {e}")
+    bot = TelegramBot()
+    bot.run()
