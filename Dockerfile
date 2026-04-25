@@ -23,6 +23,7 @@ RUN mkdir -p /app/logs
 # Переменные окружения по умолчанию (будут переопределены через docker-compose)
 ENV PYTHONUNBUFFERED=1
 
-# Запуск бота
-CMD ["python", "tg_bot.py"]
+RUN chmod +x /app/start.sh
 
+# Запуск бота
+CMD ["/app/start.sh"]
