@@ -23,7 +23,7 @@ RUN mkdir -p /app/logs
 # Переменные окружения по умолчанию (будут переопределены через docker-compose)
 ENV PYTHONUNBUFFERED=1
 
-RUN chmod +x /app/start.sh
+RUN chmod +x /app/scripts/start.sh
 
 # Запуск бота
 CMD ["/app/start.sh"]
