@@ -1,7 +1,8 @@
 import os
 import logging
 import asyncio
-from typing import Dict, List
+import re
+from typing import Dict, List, Optional
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -20,7 +21,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler("./flower_bot.log"),
+        logging.FileHandler("/app/logs/flower_bot.log"),
         logging.StreamHandler()
     ]
 )
@@ -59,6 +60,7 @@ class TelegramBot:
         self.application.add_handler(CommandHandler("help", self.help_command))
         self.application.add_handler(CommandHandler("prices", self.show_price_ranges))
         self.application.add_handler(CallbackQueryHandler(self.handle_price_range, pattern="^price_"))
+        self.application.add_handler(CallbackQueryHandler(self.handle_more_bouquets, pattern="^more_"))
         self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
         logger.info("Обработчики команд зарегистрированы")
 
@@ -136,6 +138,22 @@ class TelegramBot:
                 parse_mode="Markdown"
             )
 
+    async def handle_more_bouquets(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        await query.answer()
+        user_id = update.effective_user.id
+
+        # callback_data = "more_{start}_{remaining}"
+        parts = query.data.split("_")
+        start = int(parts[1])
+        remaining = int(parts[2])
+
+        more_text = self.flower_logic.get_more_bouquets(user_id, start, remaining)
+        if more_text:
+            await query.message.reply_text(more_text, parse_mode="Markdown")
+        else:
+            await query.message.reply_text("Больше вариантов нет.", parse_mode="Markdown")
+
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
         user_name = (
@@ -158,10 +176,28 @@ class TelegramBot:
 
             self._add_to_history(user_id, "assistant", response)
 
-            await update.message.reply_text(
-                response,
-                parse_mode="Markdown"
-            )
+            # Проверяем, есть ли маркер "показать ещё"
+            more_match = re.search(r'\|\|more:(\d+):(\d+)\|\|', response)
+            if more_match:
+                remaining = int(more_match.group(1))
+                start = int(more_match.group(2))
+                # Убираем маркер из текста
+                clean_response = response.replace(more_match.group(0), "").strip()
+                keyboard = [[InlineKeyboardButton(
+                    f"Показать ещё {remaining}",
+                    callback_data=f"more_{start}_{remaining}"
+                )]]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                await update.message.reply_text(
+                    clean_response,
+                    parse_mode="Markdown",
+                    reply_markup=reply_markup
+                )
+            else:
+                await update.message.reply_text(
+                    response,
+                    parse_mode="Markdown"
+                )
             logger.info(f"Отправлен ответ пользователю {user_id}")
 
         except Exception as e:

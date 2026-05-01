@@ -2,28 +2,18 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Установка системных зависимостей
-RUN apt-get update && apt-get install -y \
-    gcc \
-    g++ \
-    make \
-    libsqlite3-dev \
-    && rm -rf /var/lib/apt/lists/*
-
 # Копирование requirements и установка зависимостей
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --default-timeout=120 --no-cache-dir -r requirements.txt
 
 # Копирование кода приложения
 COPY . .
 
 # Создание директории для логов
-RUN mkdir -p /app/logs
+RUN mkdir -p /app/logs && chmod +x /app/scripts/start.sh
 
 # Переменные окружения по умолчанию (будут переопределены через docker-compose)
 ENV PYTHONUNBUFFERED=1
-
-RUN chmod +x /app/scripts/start.sh
 
 # Запуск бота
 CMD ["/app/scripts/start.sh"]

@@ -33,6 +33,7 @@ class FlowerLogic:
         self.bouquets_data: List[Dict[str, Any]] = []
         self.intent_llm: Optional[GigaChat] = None
         self.graph = None
+        self._last_bouquets: Dict[int, List[Dict[str, Any]]] = {}
         self.initialize_components()
 
     def load_bouquets_data(self):
@@ -140,13 +141,18 @@ class FlowerLogic:
 
 Важно:
 - Числа в сообщении НЕ всегда бюджет (пример: "хочу 101 розу" -> это количество/характеристика, НЕ бюджет).
-- Извлекай `max_price` только когда в тексте явно речь о бюджете/ценовом лимите.
+- Извлекай `max_price` когда в тексте явно речь о верхней границе бюджета ("до X", "не дороже X", "в пределах X").
+- Извлекай `min_price` когда в тексте явно речь о нижней границе бюджета ("от X", "не меньше X", "начиная от X", "X+", "X тыс" в контексте "от").
+- Если сказано "от 10 тыс" — это min_price=10000.
+- Если сказано "до 10 тыс" — это max_price=10000.
+- Если сказано "от 10 до 15 тыс" — это min_price=10000, max_price=15000.
 
 Ответ верни строго JSON без пояснений:
 {{
   "intent": "one_of_allowed_values",
   "entities": {{
     "max_price": number|null,
+    "min_price": number|null,
     "name_query": "string|null",
     "query_text": "normalized user request"
   }}
@@ -185,6 +191,17 @@ class FlowerLogic:
             else:
                 parsed_max_price = None
 
+            min_price = entities_raw.get("min_price")
+            if isinstance(min_price, (int, float)):
+                parsed_min_price: Optional[float] = float(min_price)
+            elif isinstance(min_price, str):
+                try:
+                    parsed_min_price = float(min_price.replace(",", ".").strip())
+                except ValueError:
+                    parsed_min_price = None
+            else:
+                parsed_min_price = None
+
             name_query = entities_raw.get("name_query")
             if not isinstance(name_query, str) or not name_query.strip():
                 name_query = None
@@ -196,6 +213,8 @@ class FlowerLogic:
             entities = {"query_text": query_text}
             if parsed_max_price is not None:
                 entities["max_price"] = parsed_max_price
+            if parsed_min_price is not None:
+                entities["min_price"] = parsed_min_price
             if name_query is not None:
                 entities["name_query"] = name_query.lower()
 
@@ -228,6 +247,77 @@ class FlowerLogic:
             return "recommend"
         return "unknown"
 
+    def _extract_price_from_text(self, text: str) -> Dict[str, Optional[float]]:
+        """Fallback-извлечение min_price/max_price из текста через regex."""
+        result: Dict[str, Optional[float]] = {}
+        text_lower = text.lower()
+
+        # Сначала ищем "от X до Y тыс" — комбинацию обоих цен
+        m = re.search(
+            r'(?:^|\s)от\s+(\d+(?:[.,]\d+)?)\s+до\s+(\d+(?:[.,]\d+)?)\s*тыс(?:яч)?',
+            text_lower,
+        )
+        if m:
+            result["min_price"] = float(m.group(1).replace(",", ".")) * 1000
+            result["max_price"] = float(m.group(2).replace(",", ".")) * 1000
+            return result
+
+        # "от X до Y" (без тыс)
+        m = re.search(r'(?:^|\s)от\s+(\d+(?:[.,]\d+)?)\s+до\s+(\d+(?:[.,]\d+)?)', text_lower)
+        if m:
+            result["min_price"] = float(m.group(1).replace(",", "."))
+            result["max_price"] = float(m.group(2).replace(",", "."))
+            return result
+
+        # "от X тыс" (с умножением) — min_price
+        m = re.search(r'(?:^|\s)от\s+(\d+(?:[.,]\d+)?)\s*тыс(?:яч)?', text_lower)
+        if m:
+            result["min_price"] = float(m.group(1).replace(",", ".")) * 1000
+
+        # "до X тыс" (с умножением) — max_price (если ещё не нашли выше)
+        if "max_price" not in result:
+            m = re.search(r'(?:^|\s)до\s+(\d+(?:[.,]\d+)?)\s*тыс(?:яч)?', text_lower)
+            if m:
+                result["max_price"] = float(m.group(1).replace(",", ".")) * 1000
+
+        # "от X" (без тыс) — min_price
+        if "min_price" not in result:
+            m = re.search(r'(?:^|\s)от\s+(\d+(?:[.,]\d+)?)', text_lower)
+            if m:
+                result["min_price"] = float(m.group(1).replace(",", "."))
+
+        # "до X" (без тыс) — max_price
+        if "max_price" not in result:
+            m = re.search(r'(?:^|\s)до\s+(\d+(?:[.,]\d+)?)', text_lower)
+            if m:
+                result["max_price"] = float(m.group(1).replace(",", "."))
+
+        # "не дороже X тыс", "в пределах X тыс" — max_price
+        if "max_price" not in result:
+            m = re.search(r'(?:не дороже|в пределах|не больше)\s+(\d+(?:[.,]\d+)?)\s*тыс(?:яч)?', text_lower)
+            if m:
+                result["max_price"] = float(m.group(1).replace(",", ".")) * 1000
+
+        # "не дороже X", "в пределах X" — max_price
+        if "max_price" not in result:
+            m = re.search(r'(?:не дороже|в пределах|не больше)\s+(\d+(?:[.,]\d+)?)', text_lower)
+            if m:
+                result["max_price"] = float(m.group(1).replace(",", "."))
+
+        # "не меньше X тыс", "начиная от X тыс" — min_price
+        if "min_price" not in result:
+            m = re.search(r'(?:не меньше|начиная от)\s+(\d+(?:[.,]\d+)?)\s*тыс(?:яч)?', text_lower)
+            if m:
+                result["min_price"] = float(m.group(1).replace(",", ".")) * 1000
+
+        # "не меньше X", "начиная от X" — min_price
+        if "min_price" not in result:
+            m = re.search(r'(?:не меньше|начиная от)\s+(\d+(?:[.,]\d+)?)', text_lower)
+            if m:
+                result["min_price"] = float(m.group(1).replace(",", "."))
+
+        return result
+
     def _nlu_node(self, state: AgentState) -> AgentState:
         logger.info("Agent node enter: nlu %s", self._user_context(state))
         nlu_result = self._predict_nlu_with_llm(state)
@@ -241,6 +331,17 @@ class FlowerLogic:
             logger.info("Intent fallback used: %s %s", intent, self._user_context(state))
         if "query_text" not in entities:
             entities["query_text"] = state["user_input"].lower()
+
+        # Fallback-извлечение min_price/max_price из текста, если LLM не извлёк
+        if entities.get("min_price") is None and entities.get("max_price") is None:
+            price_fallback = self._extract_price_from_text(state["user_input"])
+            for key, val in price_fallback.items():
+                if val is not None and key not in entities:
+                    entities[key] = val
+                    logger.info(
+                        "Price fallback extracted: %s=%s %s",
+                        key, val, self._user_context(state),
+                    )
 
         if intent == "chosen_by_name" and "name_query" not in entities:
             intent = "recommend"
@@ -266,9 +367,35 @@ class FlowerLogic:
         logger.info("Agent node exit: greet %s", self._user_context(state))
         return state
 
-    def _format_short_offer(self, bouquets: List[Dict[str, Any]]) -> str:
+    @staticmethod
+    def _pluralize_variant(n: int) -> str:
+        if 11 <= n % 100 <= 14:
+            return "вариантов"
+        if n % 10 == 1:
+            return "вариант"
+        if n % 10 in (2, 3, 4):
+            return "варианта"
+        return "вариантов"
+
+    def _format_short_offer(self, bouquets: List[Dict[str, Any]], max_items: int = 10) -> str:
         lines = ["Подобрал варианты:"]
-        for bouquet in bouquets[:3]:
+        total = len(bouquets)
+        show_count = min(total, max_items)
+        for bouquet in bouquets[:show_count]:
+            lines.append(
+                f"- {bouquet['Название']} — {int(bouquet['Цена'])} руб.\n"
+                f"  {bouquet['Ссылка']}"
+            )
+        if total > max_items:
+            remaining = total - max_items
+            variant = self._pluralize_variant(remaining)
+            lines.append(f"\n||more:{remaining}:{max_items}||\nХотите посмотреть ещё {remaining} {variant}?")
+        return "\n".join(lines)
+
+    def _format_bouquets_page(self, bouquets: List[Dict[str, Any]], start: int, count: int) -> str:
+        """Показывает страницу букетов начиная с индекса start."""
+        lines = ["Ещё варианты:"]
+        for bouquet in bouquets[start:start + count]:
             lines.append(
                 f"- {bouquet['Название']} — {int(bouquet['Цена'])} руб.\n"
                 f"  {bouquet['Ссылка']}"
@@ -280,7 +407,7 @@ class FlowerLogic:
         stop_words = {
             "привет", "здравствуйте", "добрый", "день", "вечер", "утро", "хочу", "нужен",
             "нужна", "нужно", "подберите", "покажи", "покажи", "варианты", "букет", "букеты",
-            "до", "руб", "рублей", "пожалуйста",
+            "до", "от", "руб", "рублей", "тыс", "тысяч", "пожалуйста",
         }
         tokens = [w for w in words if w not in stop_words and len(w) > 1]
         if not tokens:
@@ -305,16 +432,31 @@ class FlowerLogic:
         intent = state["intent"]
         entities = state["entities"]
         bouquets = state["bouquets_data"]
+        user_id = state.get("user_id")
 
         if intent == "catalog":
             sorted_bouquets = sorted(bouquets, key=lambda b: b["Цена"])
+            if user_id is not None:
+                self._last_bouquets[user_id] = sorted_bouquets
             state["response"] = self._format_short_offer(sorted_bouquets)
             logger.info("Agent node exit: offer, branch=catalog %s", self._user_context(state))
             return state
 
         if intent == "chosen_by_name":
             query = entities.get("name_query", "")
-            found = [b for b in bouquets if query in b["Название"].lower()]
+            # Токен-матчинг: разбиваем запрос на слова, проверяем что каждое
+            # слово присутствует хотя бы в одном из названий букета
+            query_tokens = set(re.findall(r"[a-zA-Zа-яА-Я0-9]+", query.lower()))
+            scored = []
+            for b in bouquets:
+                name_tokens = set(re.findall(r"[a-zA-Zа-яА-Я0-9]+", b["Название"].lower()))
+                matches = len(query_tokens & name_tokens)
+                if matches > 0:
+                    scored.append((matches, b))
+            scored.sort(key=lambda x: (-x[0], x[1]["Цена"]))
+            found = [b for _, b in scored]
+            if user_id is not None:
+                self._last_bouquets[user_id] = found
             if found:
                 state["response"] = self._format_short_offer(found)
             else:
@@ -331,14 +473,36 @@ class FlowerLogic:
 
         if intent in ("recommend", "greet_and_offer"):
             max_price = entities.get("max_price")
-            if max_price is not None:
-                filtered = [b for b in bouquets if b["Цена"] <= max_price]
+            min_price = entities.get("min_price")
+
+            # Если есть хотя бы один ценовой фильтр
+            if max_price is not None or min_price is not None:
+                filtered = bouquets
+                if max_price is not None:
+                    filtered = [b for b in filtered if b["Цена"] <= max_price]
+                if min_price is not None:
+                    filtered = [b for b in filtered if b["Цена"] >= min_price]
+
+                # Дополнительно фильтруем по текстовому запросу, если он есть
+                query_text = entities.get("query_text", state["user_input"])
+                text_filtered = self._search_bouquets_by_query(filtered, query_text)
+                if text_filtered:
+                    filtered = text_filtered
+
                 if not filtered:
+                    parts = []
+                    if min_price is not None:
+                        parts.append(f"от {int(min_price)}")
+                    if max_price is not None:
+                        parts.append(f"до {int(max_price)}")
+                    price_desc = " ".join(parts)
+                    cheapest = sorted(bouquets, key=lambda b: b["Цена"])[:10]
+                    if user_id is not None:
+                        self._last_bouquets[user_id] = cheapest
                     state["response"] = (
-                        f"В бюджете до {int(max_price)} руб. вариантов не нашёл. "
+                        f"В диапазоне {price_desc} руб. вариантов не нашёл. "
                         "Могу показать ближайшие по цене."
                     )
-                    cheapest = sorted(bouquets, key=lambda b: b["Цена"])[:3]
                     state["response"] += "\n\n" + self._format_short_offer(cheapest)
                     logger.info(
                         "Agent node exit: offer, branch=%s, within_budget=0 %s",
@@ -350,6 +514,8 @@ class FlowerLogic:
                     return state
 
                 filtered = sorted(filtered, key=lambda b: b["Цена"], reverse=True)
+                if user_id is not None:
+                    self._last_bouquets[user_id] = filtered
                 state["response"] = self._format_short_offer(filtered)
                 logger.info(
                     "Agent node exit: offer, branch=%s, within_budget=%s %s",
@@ -364,6 +530,8 @@ class FlowerLogic:
             query_text = entities.get("query_text", state["user_input"])
             relevant = self._search_bouquets_by_query(bouquets, query_text)
             if relevant:
+                if user_id is not None:
+                    self._last_bouquets[user_id] = relevant
                 state["response"] = self._format_short_offer(relevant[:3])
                 logger.info(
                     "Agent node exit: offer, branch=%s, matched_by_query=%s %s",
@@ -448,6 +616,13 @@ class FlowerLogic:
 
         result = self.graph.invoke(graph_input)
         return result["response"]
+
+    def get_more_bouquets(self, user_id: int, start: int, count: int) -> Optional[str]:
+        """Возвращает следующую страницу букетов для пользователя."""
+        bouquets = self._last_bouquets.get(user_id)
+        if not bouquets or start >= len(bouquets):
+            return None
+        return self._format_bouquets_page(bouquets, start, count)
 
     def filter_bouquets_by_price(self, max_price: float):
         return [b for b in self.bouquets_data if b['Цена'] <= max_price]
