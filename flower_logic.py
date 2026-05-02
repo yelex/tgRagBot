@@ -633,11 +633,21 @@ class FlowerLogic:
 
 
 def format_bouquet_message(bouquet):
-    return (
-        f"💐 {bouquet['Название']}\n"
-        f"💰 Цена: {bouquet['Цена']} руб.\n"
-        f"🔗 [Ссылка на букет]({bouquet['Ссылка']})"
-    )
+    parts = [f"💐 {bouquet['Название']}"]
+    if bouquet.get("Цена") and bouquet["Цена"] > 0:
+        parts.append(f"💰 Цена: {int(bouquet['Цена'])} руб.")
+    if bouquet.get("Описание"):
+        parts.append(f"📝 {bouquet['Описание']}")
+    if bouquet.get("Состав"):
+        состав = ", ".join(bouquet["Состав"])
+        parts.append(f"🌷 Состав: {состав}")
+    parts.append(f"🔗 [Ссылка на букет]({bouquet['Ссылка']})")
+    return "\n\n".join(parts)
+
+
+def get_bouquet_image(bouquet):
+    """Возвращает URL изображения букета, если есть."""
+    return bouquet.get("Изображение")
 
 
 def create_price_ranges():

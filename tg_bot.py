@@ -14,7 +14,7 @@ from telegram.ext import (
     ContextTypes,
 )
 
-from flower_logic import FlowerLogic, create_price_ranges, format_bouquet_message
+from flower_logic import FlowerLogic, create_price_ranges, format_bouquet_message, get_bouquet_image
 
 # Настройка логгера
 logging.basicConfig(
@@ -126,11 +126,27 @@ class TelegramBot:
 
         for bouquet in bouquets[:3]:
             message = format_bouquet_message(bouquet)
-            await query.message.reply_text(
-                text=message,
-                parse_mode="Markdown",
-                disable_web_page_preview=True
-            )
+            image_url = get_bouquet_image(bouquet)
+            if image_url:
+                try:
+                    await query.message.reply_photo(
+                        photo=image_url,
+                        caption=message,
+                        parse_mode="Markdown"
+                    )
+                except Exception as e:
+                    logger.warning(f"Не удалось отправить фото {image_url}: {e}")
+                    await query.message.reply_text(
+                        text=message,
+                        parse_mode="Markdown",
+                        disable_web_page_preview=True
+                    )
+            else:
+                await query.message.reply_text(
+                    text=message,
+                    parse_mode="Markdown",
+                    disable_web_page_preview=True
+                )
 
         if len(bouquets) > 3:
             await query.message.reply_text(
@@ -188,16 +204,73 @@ class TelegramBot:
                     callback_data=f"more_{start}_{remaining}"
                 )]]
                 reply_markup = InlineKeyboardMarkup(keyboard)
-                await update.message.reply_text(
-                    clean_response,
-                    parse_mode="Markdown",
-                    reply_markup=reply_markup
-                )
+                # Пробуем найти первый букет из ответа и отправить его фото
+                first_bouquet = None
+                for b in self.flower_logic.bouquets_data:
+                    if b["Название"].lower() in clean_response.lower():
+                        first_bouquet = b
+                        break
+                if first_bouquet:
+                    image_url = get_bouquet_image(first_bouquet)
+                    if image_url:
+                        try:
+                            await update.message.reply_photo(
+                                photo=image_url,
+                                caption=clean_response,
+                                parse_mode="Markdown",
+                                reply_markup=reply_markup
+                            )
+                        except Exception as e:
+                            logger.warning(f"Не удалось отправить фото {image_url}: {e}")
+                            await update.message.reply_text(
+                                clean_response,
+                                parse_mode="Markdown",
+                                reply_markup=reply_markup
+                            )
+                    else:
+                        await update.message.reply_text(
+                            clean_response,
+                            parse_mode="Markdown",
+                            reply_markup=reply_markup
+                        )
+                else:
+                    await update.message.reply_text(
+                        clean_response,
+                        parse_mode="Markdown",
+                        reply_markup=reply_markup
+                    )
             else:
-                await update.message.reply_text(
-                    response,
-                    parse_mode="Markdown"
-                )
+                # Пробуем найти первый букет из ответа и отправить его фото
+                first_bouquet = None
+                for b in self.flower_logic.bouquets_data:
+                    if b["Название"].lower() in response.lower():
+                        first_bouquet = b
+                        break
+                if first_bouquet:
+                    image_url = get_bouquet_image(first_bouquet)
+                    if image_url:
+                        try:
+                            await update.message.reply_photo(
+                                photo=image_url,
+                                caption=response,
+                                parse_mode="Markdown"
+                            )
+                        except Exception as e:
+                            logger.warning(f"Не удалось отправить фото {image_url}: {e}")
+                            await update.message.reply_text(
+                                response,
+                                parse_mode="Markdown"
+                            )
+                    else:
+                        await update.message.reply_text(
+                            response,
+                            parse_mode="Markdown"
+                        )
+                else:
+                    await update.message.reply_text(
+                        response,
+                        parse_mode="Markdown"
+                    )
             logger.info(f"Отправлен ответ пользователю {user_id}")
 
         except Exception as e:
