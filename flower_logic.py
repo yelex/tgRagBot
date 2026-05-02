@@ -1587,8 +1587,12 @@ class FlowerLogic:
         """Добавляет метаданные фазы и данных в response."""
         phase = state.get("phase", "init")
         data = state.get("collected_data", {})
-        if "||phase:" not in state.get("response", ""):
-            state["response"] += f" ||phase:{phase}|| ||data:{json.dumps(data, ensure_ascii=False)}||"
+        # Всегда перезаписываем метаданные в конце строки
+        # (убираем старые, если были)
+        resp = state.get("response", "")
+        resp = re.sub(r'\s*\|\|phase:[^\|]*\|\|\s*', '', resp)
+        resp = re.sub(r'\s*\|\|data:\{[^\}]*\}\|\|\s*', '', resp)
+        state["response"] = resp.strip() + f" ||phase:{phase}|| ||data:{json.dumps(data, ensure_ascii=False)}||"
         return state
 
     @staticmethod
