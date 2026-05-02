@@ -177,55 +177,97 @@ class TelegramBot:
                 return b
         return None
 
+    @staticmethod
+    def _clean_response(text: str) -> str:
+        """Очищает ответ от служебных мета-маркеров."""
+        cleaned = re.sub(r'\|\|phase:[a-zA-Z0-9_]+\|\|', '', text)
+        cleaned = re.sub(r'\|\|data:\{.*?\}\|\|', '', cleaned)
+        cleaned = re.sub(r'\|\|more:\d+:\d+\|\|', '', cleaned)
+        return cleaned.strip()
+
+    @staticmethod
+    def _sanitize_for_markdown(text: str) -> str:
+        """Экранирует символы, ломающие Markdown Telegram.
+        
+        Telegram Markdown чувствителен к: _ * ` [ ] ~ >
+        Экранируем только те, что НЕ являются частью Markdown-разметки.
+        """
+        result = []
+        i = 0
+        while i < len(text):
+            ch = text[i]
+            # Пропускаем уже корректные Markdown-конструкции
+            if ch == '*' and i + 1 < len(text) and text[i + 1] == '*':
+                # **bold** — корректная конструкция
+                result.append('**')
+                i += 2
+                continue
+            if ch == '_':
+                # В URL _ это часть ссылки, не Markdown
+                # Просто экранируем все _, они в Markdown — курсив, 
+                # но если_не_закрыты — ломают парсинг
+                result.append('\\_')
+                i += 1
+                continue
+            # Экранируем проблемные символы вне конструкций
+            if ch in '`[]~>':
+                result.append('\\' + ch)
+                i += 1
+                continue
+            result.append(ch)
+            i += 1
+        return ''.join(result)
+
     async def _send_response(self, update: Update, text: str, reply_markup=None):
         """Отправляет ответ: если возможно — с фото, иначе просто текст.
         
         Telegram ограничения:
         - caption фото: 1024 символа
         - сообщение: 4096 символов
-        """
-        # Удаляем маркер more из текста для поиска букета
-        clean_text = re.sub(r'\|\|more:\d+:\d+\|\|', '', text).strip()
         
+        Важно: перед отправкой очищаем мета-маркеры и экранируем Markdown.
+        """
+        # Очищаем от служебных маркеров
+        clean_text = self._clean_response(text)
+        
+        # Для URL внутри текста: экранируем Markdown-опасные символы
         first_bouquet = self._find_first_bouquet(clean_text)
         image_url = get_bouquet_image(first_bouquet) if first_bouquet else None
 
         # Если текст короткий и есть фото — отправляем как caption
-        if image_url and len(text) <= 1024:
+        if image_url and len(clean_text) <= 1024:
             try:
                 await update.message.reply_photo(
                     photo=image_url,
-                    caption=text,
-                    parse_mode="Markdown",
+                    caption=clean_text,
+                    parse_mode="MarkdownV2",
                     reply_markup=reply_markup,
                 )
                 return
             except Exception as e:
-                logger.warning(f"Не удалось отправить фото с caption: {e}")
+                logger.warning(f"Не удалось отправить фото с caption (MarkdownV2): {e}")
 
         # Если фото есть, но текст длинный — отправляем фото и текст отдельно
         if image_url:
             try:
                 await update.message.reply_photo(
                     photo=image_url,
-                    parse_mode="Markdown",
                 )
             except Exception as e:
                 logger.warning(f"Не удалось отправить фото: {e}")
 
         # Отправляем текст (с разбивкой, если слишком длинный)
-        if len(text) <= 4096:
+        if len(clean_text) <= 4096:
             await update.message.reply_text(
-                text,
-                parse_mode="Markdown",
+                clean_text,
                 reply_markup=reply_markup,
             )
         else:
-            # Разбиваем на части по ~4000 символов (с запасом под Markdown-символы)
+            # Разбиваем на части по ~4000 символов
             max_len = 4000
             parts = []
             current = ""
-            for line in text.split('\n'):
+            for line in clean_text.split('\n'):
                 if len(current) + len(line) + 1 > max_len:
                     parts.append(current)
                     current = line
@@ -241,7 +283,6 @@ class TelegramBot:
                 rm = reply_markup if i == 0 else None
                 await update.message.reply_text(
                     part,
-                    parse_mode="Markdown",
                     reply_markup=rm,
                 )
 
@@ -286,10 +327,9 @@ class TelegramBot:
             logger.info(f"Отправлен ответ пользователю {user_id}")
 
         except Exception as e:
-            logger.error(f"Ошибка при обработке сообщения: {e}")
+            logger.error(f"Ошибка при обработке сообщения: {e}", exc_info=True)
             await update.message.reply_text(
-                "Произошла ошибка при обработке запроса. Попробуйте позже.",
-                parse_mode="Markdown"
+                "Произошла ошибка при обработке запроса. Попробуйте позже."
             )
 
     async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
