@@ -170,6 +170,81 @@ class TelegramBot:
         else:
             await query.message.reply_text("Больше вариантов нет.", parse_mode="Markdown")
 
+    def _find_first_bouquet(self, text: str):
+        """Ищет первый букет, упомянутый в тексте."""
+        for b in self.flower_logic.bouquets_data:
+            if b["Название"].lower() in text.lower():
+                return b
+        return None
+
+    async def _send_response(self, update: Update, text: str, reply_markup=None):
+        """Отправляет ответ: если возможно — с фото, иначе просто текст.
+        
+        Telegram ограничения:
+        - caption фото: 1024 символа
+        - сообщение: 4096 символов
+        """
+        # Удаляем маркер more из текста для поиска букета
+        clean_text = re.sub(r'\|\|more:\d+:\d+\|\|', '', text).strip()
+        
+        first_bouquet = self._find_first_bouquet(clean_text)
+        image_url = get_bouquet_image(first_bouquet) if first_bouquet else None
+
+        # Если текст короткий и есть фото — отправляем как caption
+        if image_url and len(text) <= 1024:
+            try:
+                await update.message.reply_photo(
+                    photo=image_url,
+                    caption=text,
+                    parse_mode="Markdown",
+                    reply_markup=reply_markup,
+                )
+                return
+            except Exception as e:
+                logger.warning(f"Не удалось отправить фото с caption: {e}")
+
+        # Если фото есть, но текст длинный — отправляем фото и текст отдельно
+        if image_url:
+            try:
+                await update.message.reply_photo(
+                    photo=image_url,
+                    parse_mode="Markdown",
+                )
+            except Exception as e:
+                logger.warning(f"Не удалось отправить фото: {e}")
+
+        # Отправляем текст (с разбивкой, если слишком длинный)
+        if len(text) <= 4096:
+            await update.message.reply_text(
+                text,
+                parse_mode="Markdown",
+                reply_markup=reply_markup,
+            )
+        else:
+            # Разбиваем на части по ~4000 символов (с запасом под Markdown-символы)
+            max_len = 4000
+            parts = []
+            current = ""
+            for line in text.split('\n'):
+                if len(current) + len(line) + 1 > max_len:
+                    parts.append(current)
+                    current = line
+                else:
+                    if current:
+                        current += '\n' + line
+                    else:
+                        current = line
+            if current:
+                parts.append(current)
+
+            for i, part in enumerate(parts):
+                rm = reply_markup if i == 0 else None
+                await update.message.reply_text(
+                    part,
+                    parse_mode="Markdown",
+                    reply_markup=rm,
+                )
+
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
         user_name = (
@@ -194,83 +269,20 @@ class TelegramBot:
 
             # Проверяем, есть ли маркер "показать ещё"
             more_match = re.search(r'\|\|more:(\d+):(\d+)\|\|', response)
+            reply_markup = None
+            text_to_send = response
+
             if more_match:
                 remaining = int(more_match.group(1))
                 start = int(more_match.group(2))
-                # Убираем маркер из текста
-                clean_response = response.replace(more_match.group(0), "").strip()
+                text_to_send = response.replace(more_match.group(0), "").strip()
                 keyboard = [[InlineKeyboardButton(
                     f"Показать ещё {remaining}",
                     callback_data=f"more_{start}_{remaining}"
                 )]]
                 reply_markup = InlineKeyboardMarkup(keyboard)
-                # Пробуем найти первый букет из ответа и отправить его фото
-                first_bouquet = None
-                for b in self.flower_logic.bouquets_data:
-                    if b["Название"].lower() in clean_response.lower():
-                        first_bouquet = b
-                        break
-                if first_bouquet:
-                    image_url = get_bouquet_image(first_bouquet)
-                    if image_url:
-                        try:
-                            await update.message.reply_photo(
-                                photo=image_url,
-                                caption=clean_response,
-                                parse_mode="Markdown",
-                                reply_markup=reply_markup
-                            )
-                        except Exception as e:
-                            logger.warning(f"Не удалось отправить фото {image_url}: {e}")
-                            await update.message.reply_text(
-                                clean_response,
-                                parse_mode="Markdown",
-                                reply_markup=reply_markup
-                            )
-                    else:
-                        await update.message.reply_text(
-                            clean_response,
-                            parse_mode="Markdown",
-                            reply_markup=reply_markup
-                        )
-                else:
-                    await update.message.reply_text(
-                        clean_response,
-                        parse_mode="Markdown",
-                        reply_markup=reply_markup
-                    )
-            else:
-                # Пробуем найти первый букет из ответа и отправить его фото
-                first_bouquet = None
-                for b in self.flower_logic.bouquets_data:
-                    if b["Название"].lower() in response.lower():
-                        first_bouquet = b
-                        break
-                if first_bouquet:
-                    image_url = get_bouquet_image(first_bouquet)
-                    if image_url:
-                        try:
-                            await update.message.reply_photo(
-                                photo=image_url,
-                                caption=response,
-                                parse_mode="Markdown"
-                            )
-                        except Exception as e:
-                            logger.warning(f"Не удалось отправить фото {image_url}: {e}")
-                            await update.message.reply_text(
-                                response,
-                                parse_mode="Markdown"
-                            )
-                    else:
-                        await update.message.reply_text(
-                            response,
-                            parse_mode="Markdown"
-                        )
-                else:
-                    await update.message.reply_text(
-                        response,
-                        parse_mode="Markdown"
-                    )
+
+            await self._send_response(update, text_to_send, reply_markup)
             logger.info(f"Отправлен ответ пользователю {user_id}")
 
         except Exception as e:
