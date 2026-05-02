@@ -302,13 +302,44 @@ class FlowerLogic:
         )
         return state
 
+    # sub_phases → node_name mapping
+    _PHASE_TO_NODE: Dict[str, str] = {}
+
+    @classmethod
+    def _phase_to_node_name(cls, phase: str) -> str:
+        """Мапит подфазу (N2_brief_occasion) на узел графа (N2_brief)."""
+        if not cls._PHASE_TO_NODE:
+            # Инициализация: префикс → узел
+            cls._PHASE_TO_NODE = {
+                "N2_brief": "N2_brief",
+                "N3_catalog": "N3_catalog",
+                "N4_reference": "N4_reference",
+                "N5_urgent": "N5_urgent",
+                "N6_scheduled": "N6_scheduled",
+                "N7_pickup": "N7_pickup",
+                "N8_faq": "N8_faq",
+                "N9_offer": "N9_offer",
+                "N10_delivery": "N10_delivery",
+                "N11_complaint": "N11_complaint",
+                "N12_escalation": "N12_escalation",
+                "N13_photo": "N13_photo",
+                "N14_delivery_exec": "N14_delivery_exec",
+                "N15_close": "N15_close",
+                "payment": "payment",
+                "N0_greet": "N0_greet",
+            }
+        for prefix, node in cls._PHASE_TO_NODE.items():
+            if phase.startswith(prefix):
+                return node
+        return "router"
+
     def _route_after_nlu(self, state: AgentState) -> str:
         """Маршрутизация после NLU: учитывает фазу и интент."""
         phase = state.get("phase", "init")
 
         # Если диалог уже идёт — идём в соответствующий обработчик
         if phase != "init":
-            return phase
+            return self._phase_to_node_name(phase)
 
         # Первый вход: по интенту
         intent = state.get("intent", "unknown")
