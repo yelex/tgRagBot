@@ -819,9 +819,9 @@ class FlowerLogic:
 
         if not collected.get("occasion") and not collected.get("recipient"):
             state["phase"] = "N2_brief_occasion"
+            state["keyboard"] = ["Девушке", "Маме", "Коллеге", "Свадьба", "День рождения"]
             state["response"] = (
-                "К какому поводу и кому выбираем: "
-                "девушка/мама/коллега/свадьба?"
+                "К какому поводу и кому выбираем?"
             )
             state["response"] += " ||phase:N2_brief_occasion||"
             logger.info("N2_brief: ask occasion %s", self._user_context(state))
@@ -829,8 +829,9 @@ class FlowerLogic:
 
         if not collected.get("product_type"):
             state["phase"] = "N2_brief_format"
+            state["keyboard"] = ["Букет", "Композиция (коробка/корзина)", "Кашпо"]
             state["response"] = (
-                "Вам ближе букет, композиция (коробка/корзина) или кашпо?"
+                "Что вам ближе: букет, композиция или кашпо?"
             )
             state["response"] += " ||phase:N2_brief_format||"
             logger.info("N2_brief: ask format %s", self._user_context(state))
@@ -838,8 +839,9 @@ class FlowerLogic:
 
         if not collected.get("gamma"):
             state["phase"] = "N2_brief_gamma"
+            state["keyboard"] = ["Нежно-пастельный", "Яркий/насыщенный"]
             state["response"] = (
-                "Какой стиль предпочитаете: нежно-пастельный или яркий/насыщенный?"
+                "Какой стиль предпочитаете?"
             )
             state["response"] += " ||phase:N2_brief_gamma||"
             logger.info("N2_brief: ask gamma %s", self._user_context(state))
@@ -848,9 +850,9 @@ class FlowerLogic:
         if "restrictions_asked" not in collected:
             collected["restrictions_asked"] = True
             state["phase"] = "N2_brief_restrictions"
+            state["keyboard"] = ["Нет ограничений", "Без лилий", "Без резкого аромата"]
             state["response"] = (
-                "Есть ли цветы, которые точно нельзя "
-                "(аллергия на запах, лилии, сильный аромат)?"
+                "Есть ли цветы, которые точно нельзя?"
             )
             state["response"] += " ||phase:N2_brief_restrictions||"
             logger.info("N2_brief: ask restrictions %s", self._user_context(state))
@@ -1303,9 +1305,9 @@ class FlowerLogic:
             self._last_bouquets[user_id] = filtered_sorted
 
         lines = ["Подобрал для вас варианты:\n"]
-        labels = ["✅ *Вариант 1 (Good)*", "⭐ *Вариант 2 (Better)*", "🏆 *Вариант 3 (Best)*"]
+        labels = ["✅ Вариант 1", "⭐ Вариант 2", "🏆 Вариант 3"]
         for i, b in enumerate(unique_picks[:3]):
-            label = labels[i] if i < len(labels) else f"*Вариант {i+1}*"
+            label = labels[i] if i < len(labels) else f"Вариант {i+1}"
             lines.append(
                 f"{label}\n"
                 f"💐 {b['Название']}\n"
@@ -1313,7 +1315,7 @@ class FlowerLogic:
                 f"🔗 {b['Ссылка']}\n"
             )
 
-        lines.append("_Можно добавить:_")
+        lines.append("Можно добавить:")
         lines.append("• ✉️ Открытка — бесплатно")
         lines.append("• 🏺 Ваза стеклянная — от 1 500 ₽")
         lines.append("• 🎈 Шарики, сладкое — по запросу")
@@ -1609,15 +1611,19 @@ class FlowerLogic:
     # ──────────────────────────────────────────────
 
     def _wrap_response(self, state: AgentState) -> AgentState:
-        """Добавляет метаданные фазы и данных в response."""
+        """Добавляет метаданные фазы, данных и клавиатуры в response."""
         phase = state.get("phase", "init")
         data = state.get("collected_data", {})
+        keyboard = state.get("keyboard")  # список строк для кнопок-саджестов
         # Всегда перезаписываем метаданные в конце строки
         # (убираем старые, если были)
         resp = state.get("response", "")
         resp = re.sub(r'\s*\|\|phase:[^\|]*\|\|\s*', '', resp)
         resp = re.sub(r'\s*\|\|data:\{[^\}]*\}\|\|\s*', '', resp)
+        resp = re.sub(r'\s*\|\|keyboard:\[.*?\]\|\|\s*', '', resp)
         state["response"] = resp.strip() + f" ||phase:{phase}|| ||data:{json.dumps(data, ensure_ascii=False)}||"
+        if keyboard:
+            state["response"] += f" ||keyboard:{json.dumps(keyboard, ensure_ascii=False)}||"
         return state
 
     @staticmethod

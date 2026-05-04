@@ -1,10 +1,11 @@
+import json
 import os
 import logging
 import asyncio
 import re
 from typing import Dict, List, Optional
 from dotenv import load_dotenv
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -178,12 +179,20 @@ class TelegramBot:
         return None
 
     @staticmethod
-    def _clean_response(text: str) -> str:
-        """Очищает ответ от служебных мета-маркеров."""
+    def _clean_response(text: str):
+        """Очищает ответ от служебных мета-маркеров. Возвращает (cleaned_text, keyboard_or_None)."""
+        keyboard = None
+        kb_match = re.search(r'\|\|keyboard:(\[.*?\])\|\|', text)
+        if kb_match:
+            try:
+                keyboard = json.loads(kb_match.group(1))
+            except (json.JSONDecodeError, ValueError):
+                pass
         cleaned = re.sub(r'\|\|phase:[a-zA-Z0-9_]+\|\|', '', text)
         cleaned = re.sub(r'\|\|data:\{.*?\}\|\|', '', cleaned)
         cleaned = re.sub(r'\|\|more:\d+:\d+\|\|', '', cleaned)
-        return cleaned.strip()
+        cleaned = re.sub(r'\|\|keyboard:\[.*?\]\|\|', '', cleaned)
+        return cleaned.strip(), keyboard
 
     @staticmethod
     def _sanitize_for_markdown(text: str) -> str:
@@ -225,12 +234,19 @@ class TelegramBot:
         - caption фото: 1024 символа
         - сообщение: 4096 символов
         
-        Важно: перед отправкой очищаем мета-маркеры и экранируем Markdown.
+        Важно: перед отправкой очищаем мета-маркеры.
         """
-        # Очищаем от служебных маркеров
-        clean_text = self._clean_response(text)
-        
-        # Для URL внутри текста: экранируем Markdown-опасные символы
+        # Очищаем от служебных маркеров (теперь функция возвращает кортеж)
+        clean_text, kb_list = self._clean_response(text)
+        # Если reply_markup ещё не передан, а kb_list есть — создаём ReplyKeyboardMarkup
+        if reply_markup is None and kb_list:
+            reply_markup = ReplyKeyboardMarkup(
+                [[KeyboardButton(opt)] for opt in kb_list],
+                resize_keyboard=True,
+                one_time_keyboard=True,
+            )
+
+        # Для URL внутри текста: ищем букет
         first_bouquet = self._find_first_bouquet(clean_text)
         image_url = get_bouquet_image(first_bouquet) if first_bouquet else None
 
@@ -240,12 +256,11 @@ class TelegramBot:
                 await update.message.reply_photo(
                     photo=image_url,
                     caption=clean_text,
-                    parse_mode="MarkdownV2",
                     reply_markup=reply_markup,
                 )
                 return
             except Exception as e:
-                logger.warning(f"Не удалось отправить фото с caption (MarkdownV2): {e}")
+                logger.warning(f"Не удалось отправить фото с caption: {e}")
 
         # Если фото есть, но текст длинный — отправляем фото и текст отдельно
         if image_url:
