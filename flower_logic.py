@@ -336,15 +336,40 @@ class FlowerLogic:
     def _route_after_nlu(self, state: AgentState) -> str:
         """Маршрутизация после NLU: учитывает фазу и интент."""
         phase = state.get("phase", "init")
+        intent = state.get("intent", "unknown")
+
+        # Интенты, которые могут прервать любую текущую фазу
+        override_intents: Dict[str, str] = {
+            "recommend": "N3_catalog",
+            "catalog": "N3_catalog",
+            "greet": "N0_greet",
+            "greet_and_offer": "N0_greet",
+            "chosen_by_name": "N9_offer",
+            "complaint": "N11_complaint",
+            "urgent": "N5_urgent",
+            "corporate": "N12_escalation",
+            "faq": "N8_faq",
+            "pickup": "N7_pickup",
+            "occasion": "N2_brief",
+            "photo_request": "N13_photo",
+            "contact_owner": "N12_escalation",
+        }
+        if intent in override_intents:
+            logger.info(
+                "INTENT OVERRIDE: intent=%s перехватывает фазу %s → %s uid=%s",
+                intent, phase, override_intents[intent],
+                state.get("user_id", "unknown"),
+            )
+            # Сбрасываем фазу на init, чтобы узел не думал что мы в середине диалога доставки
+            state["phase"] = "init"
+            return override_intents[intent]
 
         # Если диалог уже идёт — идём в соответствующий обработчик
         if phase != "init":
             return self._phase_to_node_name(phase)
 
         # Первый вход: по интенту
-        intent = state.get("intent", "unknown")
         phase_map: Dict[str, str] = {
-            "greet": "N0_greet",
             "greet_and_offer": "N0_greet",
             "catalog": "N3_catalog",
             "recommend": "N0_greet",
