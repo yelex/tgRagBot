@@ -338,7 +338,13 @@ class FlowerLogic:
         phase = state.get("phase", "init")
         intent = state.get("intent", "unknown")
 
-        # Интенты, которые могут прервать любую текущую фазу
+        # Интенты, которые могут прервать текущую фазу
+        # (НЕ срабатывают внутри брифа/каталога/приветствия — там диалог идёт своим чередом)
+        non_override_phases = {
+            "init", "N0_greet", "N2_brief_budget", "N2_brief_occasion",
+            "N2_brief_format", "N2_brief_gamma", "N2_brief_restrictions",
+            "N2_brief_reference", "N3_catalog_choice",
+        }
         override_intents: Dict[str, str] = {
             "recommend": "N3_catalog",
             "catalog": "N3_catalog",
@@ -354,7 +360,7 @@ class FlowerLogic:
             "photo_request": "N13_photo",
             "contact_owner": "N12_escalation",
         }
-        if intent in override_intents:
+        if intent in override_intents and phase not in non_override_phases:
             logger.info(
                 "INTENT OVERRIDE: intent=%s перехватывает фазу %s → %s uid=%s",
                 intent, phase, override_intents[intent],
@@ -632,12 +638,14 @@ class FlowerLogic:
         result: Dict[str, Optional[float]] = {}
         t = text.lower()
 
+        # "от X до Y тыс"
         m = re.search(r'(?:\s|^)от\s+(\d+(?:[.,]\d+)?)\s+до\s+(\d+(?:[.,]\d+)?)\s*тыс(?:яч)?', t)
         if m:
             result["min_price"] = float(m.group(1).replace(",",".")) * 1000
             result["max_price"] = float(m.group(2).replace(",",".")) * 1000
             return result
 
+        # "от X тыс"
         m = re.search(r'(?:\s|^)от\s+(\d+(?:[.,]\d+)?)\s*тыс(?:яч)?', t)
         if m:
             result["min_price"] = float(m.group(1).replace(",",".")) * 1000
@@ -651,6 +659,14 @@ class FlowerLogic:
             m = re.search(r'(?:не дороже|в пределах|не больше)\s+(\d+(?:[.,]\d+)?)\s*тыс(?:яч)?', t)
             if m:
                 result["max_price"] = float(m.group(1).replace(",",".")) * 1000
+
+        # Просто число с "руб" или без — например "20000руб" или "15000"
+        if not result.get("min_price") and not result.get("max_price"):
+            m = re.search(r'(?:^|\s)(\d{4,6})\s*(?:руб|₽|р\.|rub)?(?:\s|$)', t)
+            if m:
+                val = float(m.group(1))
+                if val >= 1000:
+                    result["min_price"] = val
 
         return result
 
@@ -739,9 +755,9 @@ class FlowerLogic:
         state["phase"] = "N0_greet"
         state["response"] = (
             "Не совсем понял ваш запрос. Давайте начнём сначала:\n\n"
-            "• *Хочу заказать букет* — напишите бюджет и пожелания\n"
-            "• *Узнать о доставке* — «доставка»\n"
-            "• *Посмотреть каталог* — «каталог»"
+            "• Хочу заказать букет — напишите бюджет и пожелания\n"
+            "• Узнать о доставке — «доставка»\n"
+            "• Посмотреть каталог — «каталог»"
         )
         state["response"] += " ||phase:N0_greet||"
         logger.info("Router fallback → N0_greet %s", self._user_context(state))
@@ -761,8 +777,11 @@ class FlowerLogic:
 
         # Сохраняем данные из сообщения
         if entities.get("max_price") or entities.get("min_price"):
-            collected["budget_max"] = entities.get("max_price")
-            collected["budget_min"] = entities.get("min_price")
+            bmin, bmax = self._normalize_budget_range(
+                entities.get("min_price"), entities.get("max_price")
+            )
+            collected["budget_min"] = bmin
+            collected["budget_max"] = bmax
             if collected["budget_min"] and collected["budget_min"] < 5000:
                 collected["budget_min"] = 5000
 
@@ -785,8 +804,11 @@ class FlowerLogic:
         if not collected.get("budget_max") and not collected.get("budget_min"):
             pf = self._extract_price_from_text(text)
             if pf.get("max_price") or pf.get("min_price"):
-                collected["budget_max"] = pf.get("max_price")
-                collected["budget_min"] = pf.get("min_price")
+                bmin, bmax = self._normalize_budget_range(
+                    pf.get("min_price"), pf.get("max_price")
+                )
+                collected["budget_min"] = bmin
+                collected["budget_max"] = bmax
                 if collected.get("budget_min") and collected["budget_min"] < 5000:
                     collected["budget_min"] = 5000
 
@@ -915,10 +937,10 @@ class FlowerLogic:
                 ("15 000–20 000 ₽", [b for b in filtered if 15000 < b["Цена"] <= 20000]),
                 ("Свыше 20 000 ₽", [b for b in filtered if b["Цена"] > 20000]),
             ]
-            lines = ["📋 *Категории букетов:*\n"]
+            lines = ["📋 Категории букетов:\n"]
             for name, items in categories:
                 if items:
-                    lines.append(f"• *{name}* — {len(items)} {self._pluralize_variant(len(items))}")
+                    lines.append(f"• {name} — {len(items)} {self._pluralize_variant(len(items))}")
             lines.append("\nНапишите бюджет или название категории — покажу варианты.")
             state["response"] = "\n".join(lines)
             state["phase"] = "N3_catalog_choice"
@@ -1120,7 +1142,7 @@ class FlowerLogic:
             state["collected_data"] = collected
             state["phase"] = "N7_pickup_data"
             state["response"] = (
-                "🏪 *Самовывоз*\n\n"
+                "🏪 Самовывоз\n\n"
                 "Правила:\n"
                 "• Самовывоз только по 100% предоплате\n"
                 "• После сборки отправим фото\n\n"
@@ -1165,28 +1187,28 @@ class FlowerLogic:
 
         # Формируем ответ под вопрос
         if any(w in text for w in ("минимальн", "от скольк")):
-            response = "📌 *Минимальный заказ — 5 000 ₽.*"
+            response = "📌 Минимальный заказ — 5 000 ₽."
         elif any(w in text for w in ("анонимн", "тайно", "секрет")):
             response = (
-                "🤫 *Анонимная доставка — возможна.* "
+                "🤫 Анонимная доставка — возможна. "
                 "Можем не указывать отправителя."
             )
         elif any(w in text for w in ("открытк", "записк")):
             response = (
-                "✉️ *Открытка — бесплатно!*\n"
+                "✉️ Открытка — бесплатно!\n"
                 "• Рукописная — любой текст\n"
                 "• Можно анонимно"
             )
         elif any(w in text for w in ("ваз", "вазу")):
-            response = "🏺 *Вазы:* стеклянные, от 1 500 ₽."
+            response = "🏺 Вазы: стеклянные, от 1 500 ₽."
         elif any(w in text for w in ("свежест", "гаранти")):
             response = (
-                "🌷 *Гарантия свежести:* цветы закупаем ежедневно.\n"
+                "🌷 Гарантия свежести: цветы закупаем ежедневно.\n"
                 "Если завяли за 1–2 дня — скидка 50% на 2 заказа."
             )
         elif any(w in text for w in ("замена", "замен")):
             response = (
-                "🔄 *Замены:* в той же гамме и ценовом диапазоне.\n"
+                "🔄 Замены: в той же гамме и ценовом диапазоне.\n"
                 "По референсу — максимально похоже."
             )
         elif any(w in text for w in ("работа", "график", "часы")):
@@ -1196,13 +1218,13 @@ class FlowerLogic:
             )
         elif any(w in text for w in ("мкад", "достав")):
             response = (
-                "🚚 *Доставка:*\n"
+                "🚚 Доставка:\n"
                 "• МКАД — 600 ₽ (бесплатно при заказе >20 000 ₽)\n"
                 "• За МКАД — от 1 500 ₽ (зависит от расстояния)"
             )
         elif any(w in text for w in ("оплат", "карт", "нал")):
             response = (
-                "💳 *Оплата:* перевод, ссылка, наличные при получении.\n"
+                "💳 Оплата: перевод, ссылка, наличные при получении.\n"
                 "Работаем с юрлицами."
             )
         else:
@@ -1384,12 +1406,12 @@ class FlowerLogic:
             return self._wrap_response(state)
 
         # Адрес есть — показываем итог
-        delivery_line = "🚚 *Доставка:* 0 ₽ (бесплатно при заказе от 20 000 ₽)" \
-            if delivery_price == 0 else f"🚚 *Доставка:* {delivery_price} ₽ (МКАД)"
+        delivery_line = "🚚 Доставка: 0 ₽ (бесплатно при заказе от 20 000 ₽)" \
+            if delivery_price == 0 else f"🚚 Доставка: {delivery_price} ₽ (МКАД)"
 
         state["response"] = (
             f"{delivery_line}\n\n"
-            "📋 *Подтвердите детали заказа:*\n"
+            "📋 Подтвердите детали заказа:\n"
             f"📍 Адрес: {collected['address']}\n"
             "⏰ Время: уточним\n\n"
             "Всё верно? Переходим к оплате?"
@@ -1466,7 +1488,7 @@ class FlowerLogic:
             collected["photo_requested"] = True
             state["phase"] = "N13_photo_approval"
             state["response"] = (
-                "📸 *Фото перед отправкой*\n\n"
+                "📸 Фото перед отправкой\n\n"
                 "Постоянным клиентам отправляем фото после доставки.\n"
                 "По запросу — можем отправить фото букета перед отправкой.\n\n"
                 "Если заказ уже оформлен — напишите номер, отправлю фото."
@@ -1567,12 +1589,12 @@ class FlowerLogic:
         collected = state.get("collected_data", {})
 
         state["response"] = (
-            "💳 *Способы оплаты:*\n\n"
+            "💳 Способы оплаты:\n\n"
             "• 💸 Перевод на карту\n"
             "• 🔗 Ссылка на оплату\n"
             "• 💵 Наличные при получении\n"
             "• 🏢 Работаем с юрлицами\n\n"
-            "*Условия:*\n"
+            "Условия:\n"
             "• Для новых клиентов — предоплата\n"
             "• Постоянным/по рекомендации — оплата при получении\n"
             "• Можно поставить в работу до оплаты\n\n"
@@ -1625,6 +1647,17 @@ class FlowerLogic:
         if keyboard:
             state["response"] += f" ||keyboard:{json.dumps(keyboard, ensure_ascii=False)}||"
         return state
+
+    @staticmethod
+    def _normalize_budget_range(min_price: Optional[float], max_price: Optional[float]):
+        """Если указана только одна граница — расширяет до диапазона ±10%.
+        Возвращает (budget_min, budget_max)."""
+        if min_price and not max_price:
+            # Пользователь сказал «от X» или просто «X руб» — даём диапазон ±10%
+            return (min_price * 0.9, min_price * 1.1)
+        if max_price and not min_price:
+            return (max_price * 0.9, max_price * 1.1)
+        return (min_price, max_price)
 
     @staticmethod
     def _pluralize_variant(n: int) -> str:
