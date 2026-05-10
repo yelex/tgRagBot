@@ -14,16 +14,12 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 
-DEFAULT_DELIVERY_ZONES: Dict[str, Dict[str, Any]] = {
-    "mкад": {"min_km": 0, "max_km": 0, "price": 600, "label": "В пределах МКАД"},
-    "5-10": {"min_km": 5, "max_km": 10, "price": 1500, "label": "5–10 км за МКАД"},
-    "10-20": {"min_km": 10, "max_km": 20, "price": 2000, "label": "10–20 км за МКАД"},
-    "20-30": {"min_km": 20, "max_km": 30, "price": 3000, "label": "20–30 км за МКАД"},
-    "30-40": {"min_km": 30, "max_km": 40, "price": 4000, "label": "30–40 км за МКАД"},
-    "40-50": {"min_km": 40, "max_km": 50, "price": 5000, "label": "40–50 км за МКАД"},
-}
-
-FREE_DELIVERY_THRESHOLD = 20000
+DELIVERY_MKAD_PRICE = 600          # В пределах МКАД
+DELIVERY_BEYOND_BASE = 1000         # Базовая цена за МКАД
+DELIVERY_BEYOND_PER_KM = 50         # + 50 ₽/км от МКАД
+FREE_DELIVERY_THRESHOLD = 20000     # Бесплатная доставка от этой суммы (МКАД)
+COURIER_WAIT_FREE_MIN = 15          # Бесплатное ожидание курьера (мин)
+COURIER_WAIT_PRICE_PER_10MIN = 100  # Цена за каждые 10 мин сверх лимита
 
 
 class AgentState(TypedDict):
@@ -874,10 +870,22 @@ class FlowerLogic:
             state["phase"] = "N2_brief_restrictions"
             state["keyboard"] = ["Нет ограничений", "Без лилий", "Без резкого аромата"]
             state["response"] = (
-                "Есть ли цветы, которые точно нельзя?"
+                "Есть ли цветы, которые точно нельзя?\n"
+                "(аллергии, запах, кошки, лилии и т.п.)"
             )
             state["response"] += " ||phase:N2_brief_restrictions||"
             logger.info("N2_brief: ask restrictions %s", self._user_context(state))
+            return self._wrap_response(state)
+
+        if not collected.get("size") and "size_asked" not in collected:
+            collected["size_asked"] = True
+            state["phase"] = "N2_brief_restrictions"
+            state["keyboard"] = ["Компактный (S)", "Средний (M)", "Пышный (L)"]
+            state["response"] = (
+                "Какой размер предпочитаете?"
+            )
+            state["response"] += " ||phase:N2_brief_restrictions||"
+            logger.info("N2_brief: ask size %s", self._user_context(state))
             return self._wrap_response(state)
 
         if "reference_asked" not in collected:
@@ -1191,12 +1199,14 @@ class FlowerLogic:
         elif any(w in text for w in ("анонимн", "тайно", "секрет")):
             response = (
                 "🤫 Анонимная доставка — возможна. "
-                "Можем не указывать отправителя."
+                "Можем не указывать отправителя. "
+                "Открытка тоже может быть без подписи."
             )
         elif any(w in text for w in ("открытк", "записк")):
             response = (
                 "✉️ Открытка — бесплатно!\n"
                 "• Рукописная — любой текст\n"
+                "• Можно напечатать\n"
                 "• Можно анонимно"
             )
         elif any(w in text for w in ("ваз", "вазу")):
@@ -1204,11 +1214,15 @@ class FlowerLogic:
         elif any(w in text for w in ("свежест", "гаранти")):
             response = (
                 "🌷 Гарантия свежести: цветы закупаем ежедневно.\n"
-                "Если завяли за 1–2 дня — скидка 50% на 2 заказа."
+                "Если завяли за 1–2 дня — разберёмся.\n"
+                "Запросим фото и условия хранения.\n"
+                "Если наша вина — скидка 50% на следующий заказ."
             )
         elif any(w in text for w in ("замена", "замен")):
             response = (
                 "🔄 Замены: в той же гамме и ценовом диапазоне.\n"
+                "Незначительные (10–15% состава) — без согласования.\n"
+                "Если меняется ключевой цветок/цвет — согласуем с Вами.\n"
                 "По референсу — максимально похоже."
             )
         elif any(w in text for w in ("работа", "график", "часы")):
@@ -1216,16 +1230,38 @@ class FlowerLogic:
                 "🕐 Приём заказов: 9:00–23:00.\n"
                 "🚚 Доставка: 24/7."
             )
-        elif any(w in text for w in ("мкад", "достав")):
+        elif any(w in text for w in ("мкад", "достав", "километр", "за город")):
             response = (
                 "🚚 Доставка:\n"
-                "• МКАД — 600 ₽ (бесплатно при заказе >20 000 ₽)\n"
-                "• За МКАД — от 1 500 ₽ (зависит от расстояния)"
+                "• МКАД — от 600 ₽ (бесплатно при заказе от 20 000 ₽)\n"
+                "• За МКАД — 1 000 ₽ + 50 ₽/км\n"
+                "• Срочная — от 1,5 часов\n"
+                "• Ночная (23:00–09:00) — заранее оформленные заказы"
             )
-        elif any(w in text for w in ("оплат", "карт", "нал")):
+        elif any(w in text for w in ("оплат", "карт", "нал", "перевод")):
             response = (
-                "💳 Оплата: перевод, ссылка, наличные при получении.\n"
-                "Работаем с юрлицами."
+                "💳 Оплата:\n"
+                "• Перевод на карту (Сбер / Тинькофф)\n"
+                "• Ссылка на оплату\n"
+                "• Наличные при получении\n"
+                "• Юрлица — по реквизитам\n\n"
+                "Новый заказ запускается в работу после оплаты."
+            )
+        elif any(w in text for w in ("отмен", "вернуть", "депозит")):
+            response = (
+                "Перенос до отправки — бесплатно.\n"
+                "Отмена после сборки — цветы уже подготовлены, "
+                "предлагаем депозит на следующий заказ."
+            )
+        elif any(w in text for w in ("ожидан", "курьер", "ждать")):
+            response = (
+                "⏱ Курьер ожидает 15 минут бесплатно.\n"
+                "Далее — 100 ₽ за каждые 10 минут."
+            )
+        elif any(w in text for w in ("повторн", "не дозвон", "не вруч")):
+            response = (
+                "Если получателя не оказалось — договариваемся о повторной доставке.\n"
+                "По тем же тарифам. Если по нашей вине — бесплатно."
             )
         else:
             response = (
@@ -1344,11 +1380,49 @@ class FlowerLogic:
         lines.append("\nКакой вариант больше нравится? Или хотите что-то поменять?")
 
         state["response"] = "\n".join(lines)
-        state["phase"] = "N10_delivery"
+        state["phase"] = "N9_offer"
         state["collected_data"] = collected
-        state["response"] += f" ||phase:N10_delivery|| ||data:{json.dumps(collected, ensure_ascii=False)}||"
+        state["response"] += f" ||phase:N9_offer|| ||data:{json.dumps(collected, ensure_ascii=False)}||"
         logger.info("N9_offer: %d options presented %s", len(unique_picks), self._user_context(state))
         return state
+
+    def _N9_confirm_node(self, state: AgentState) -> AgentState:
+        """После выбора букета — спрашиваем открытку и контакт получателя."""
+        logger.info("Agent node enter: N9_confirm %s", self._user_context(state))
+
+        collected = state.get("collected_data", {})
+        text = state["user_input"].lower()
+
+        # Шаг 1: текст открытки
+        if "card_asked" not in collected:
+            collected["card_asked"] = True
+            state["phase"] = "N9_offer"
+            state["keyboard"] = ["Нужна открытка", "Без открытки"]
+            state["response"] = (
+                "✉️ Открытка — бесплатно, рукописная.\n\n"
+                "Нужна? Если да — напишите текст."
+            )
+            state["response"] += f" ||phase:N9_offer|| ||data:{json.dumps(collected, ensure_ascii=False)}||"
+            state["collected_data"] = collected
+            logger.info("N9_confirm: ask card %s", self._user_context(state))
+            return self._wrap_response(state)
+
+        # Шаг 2: телефон получателя
+        if not collected.get("recipient_phone") and "phone_asked" not in collected:
+            collected["phone_asked"] = True
+            state["phase"] = "N10_delivery"
+            state["response"] = (
+                "📞 Подскажите контакт получателя (телефон).\n"
+                "Нужен для уточнения деталей доставки."
+            )
+            state["response"] += f" ||phase:N10_delivery|| ||data:{json.dumps(collected, ensure_ascii=False)}||"
+            state["collected_data"] = collected
+            logger.info("N9_confirm: ask phone %s", self._user_context(state))
+            return self._wrap_response(state)
+
+        # Всё собрано — переходим к доставке
+        state["phase"] = "N10_delivery"
+        return self._N10_delivery_node(state)
 
     # ──────────────────────────────────────────────
     # N10 — Доставка (сбор данных + цена)
@@ -1379,21 +1453,30 @@ class FlowerLogic:
             "подмосковье", "за город",
         ))
 
-        if beyond_mkad:
+        if beyond_mkad and not collected.get("beyond_km"):
+            # Спрашиваем километраж для расчёта
             state["collected_data"] = collected
             state["response"] = (
-                "Сейчас уточню точную стоимость доставки по этому адресу "
-                "и вернусь к вам."
+                "Доставка за МКАД рассчитывается: 1 000 ₽ + 50 ₽ за каждый км от МКАД.\n\n"
+                "Подскажите примерное расстояние от МКАД (в км)?\n"
+                "Или назовите район/город — посчитаем."
             )
-            state["phase"] = "N12_escalated"
-            collected["escalation_reason"] = "beyond_mkad"
-            state["response"] += " ||phase:N12_escalated||"
-            logger.info("N10_delivery → N12 (beyond MKAD) %s", self._user_context(state))
-            return state
+            state["phase"] = "N10_delivery"
+            state["response"] += " ||phase:N10_delivery||"
+            logger.info("N10_delivery: ask km for beyond MKAD %s", self._user_context(state))
+            return self._wrap_response(state)
 
-        # МКАД: цена доставки
-        total = collected.get("budget_max") or 0
-        delivery_price = 0 if total >= FREE_DELIVERY_THRESHOLD else 600
+        # Если есть км за МКАД — считаем по формуле
+        if beyond_mkad and collected.get("beyond_km"):
+            km = collected["beyond_km"]
+            delivery_price = DELIVERY_BEYOND_BASE + DELIVERY_BEYOND_PER_KM * km
+            delivery_line = f"🚚 Доставка: {int(delivery_price):,} ₽ (за МКАД, {int(km)} км)"
+        else:
+            # Внутри МКАД
+            total = collected.get("budget_max") or 0
+            delivery_price = 0 if total >= FREE_DELIVERY_THRESHOLD else DELIVERY_MKAD_PRICE
+            delivery_line = "🚚 Доставка: 0 ₽ (бесплатно при заказе от 20 000 ₽)" \
+                if delivery_price == 0 else f"🚚 Доставка: {delivery_price} ₽ (МКАД)"
 
         if not collected.get("address"):
             state["response"] = (
@@ -1405,15 +1488,13 @@ class FlowerLogic:
             logger.info("N10_delivery: ask address %s", self._user_context(state))
             return self._wrap_response(state)
 
-        # Адрес есть — показываем итог
-        delivery_line = "🚚 Доставка: 0 ₽ (бесплатно при заказе от 20 000 ₽)" \
-            if delivery_price == 0 else f"🚚 Доставка: {delivery_price} ₽ (МКАД)"
-
+        # Адрес есть — показываем итог с правилами ожидания
         state["response"] = (
             f"{delivery_line}\n\n"
             "📋 Подтвердите детали заказа:\n"
             f"📍 Адрес: {collected['address']}\n"
             "⏰ Время: уточним\n\n"
+            "⏱ Курьер ожидает 15 минут бесплатно, далее 100 ₽ за каждые 10 минут.\n\n"
             "Всё верно? Переходим к оплате?"
         )
         state["phase"] = "payment"
@@ -1435,26 +1516,55 @@ class FlowerLogic:
             collected["complaint_facts_collected"] = True
             state["phase"] = "N11_complaint_facts"
             state["response"] = (
-                "Понимаю. Примите наши извинения.\n\n"
+                "Примите наши извинения.\n\n"
                 "Чтобы разобраться, напишите, пожалуйста:\n"
                 "• Когда получили букет\n"
                 "• Что именно не так (фото приложите)\n"
-                "• Условия хранения (в вазе/без, температура)"
+                "• Условия хранения (в вазе/без, температура)\n\n"
+                "Это поможет нам понять причину и предложить решение."
             )
             state["response"] += " ||phase:N11_complaint_facts||"
             state["collected_data"] = collected
             logger.info("N11_complaint: collect facts %s", self._user_context(state))
             return self._wrap_response(state)
 
-        # Факты собраны → эскалация
-        state["phase"] = "N12_escalated"
-        collected["escalation_reason"] = "complaint"
-        state["collected_data"] = collected
+        # Факты собраны — даём конкретные обещания из политики
+        text = state["user_input"].lower()
+
+        # Проверка на неправильное хранение
+        bad_storage = any(w in text for w in (
+            "холод", "балкон", "окно", "батарея", "солнц",
+            "фрукт", "яблок", "банан",
+        ))
+
+        if bad_storage:
+            state["response"] = (
+                "Понимаю Ваше разочарование. К сожалению, при указанных условиях "
+                "хранения компенсация не предусмотрена — цветы чувствительны "
+                "к температуре и окружению.\n\n"
+                "💡 Рекомендации по уходу:\n"
+                "• Вода комнатной температуры, менять раз в 2 дня\n"
+                "• Подрезать стебли под углом\n"
+                "• Не ставить рядом с фруктами и на прямое солнце\n\n"
+                "Если есть вопросы — напишите, постараюсь помочь."
+            )
+            state["phase"] = "N15_close"
+            state["response"] += " ||phase:N15_close||"
+            logger.info("N11_complaint: bad storage, no compensation %s", self._user_context(state))
+            return state
+
+        # Наша вина — предлагаем компенсацию
         state["response"] = (
-            "Сейчас всё уточню и вернусь к вам."
+            "Спасибо за информацию. Понимаю ситуацию и предлагаю:\n\n"
+            "• Скидка 50% на следующий заказ\n"
+            "• Или скидка 50% на следующие 2 заказа\n\n"
+            "Также можем пересобрать букет. Что Вам будет удобнее?"
         )
+        state["phase"] = "N12_escalated"
+        collected["escalation_reason"] = "complaint_compensation"
+        state["collected_data"] = collected
         state["response"] += " ||phase:N12_escalated||"
-        logger.info("N11_complaint → N12 (escalated) %s", self._user_context(state))
+        logger.info("N11_complaint → N12 (compensation) %s", self._user_context(state))
         return state
 
     # ──────────────────────────────────────────────
@@ -1483,29 +1593,40 @@ class FlowerLogic:
         logger.info("Agent node enter: N13_photo %s", self._user_context(state))
 
         collected = state.get("collected_data", {})
+        is_returning = collected.get("is_returning")
 
         if "photo_requested" not in collected:
             collected["photo_requested"] = True
             state["phase"] = "N13_photo_approval"
-            state["response"] = (
-                "📸 Фото перед отправкой\n\n"
-                "Постоянным клиентам отправляем фото после доставки.\n"
-                "По запросу — можем отправить фото букета перед отправкой.\n\n"
-                "Если заказ уже оформлен — напишите номер, отправлю фото."
-            )
+
+            if is_returning:
+                state["response"] = (
+                    "📸 Фото букета\n\n"
+                    "Постоянным клиентам обычно отправляем фото после доставки. "
+                    "Но если хотите увидеть перед отправкой — без проблем, пришлём.\n\n"
+                    "Нужно фото до доставки?"
+                )
+            else:
+                state["response"] = (
+                    "📸 Перед отправкой пришлём фото букета — "
+                    "чтобы Вы убедились, что всё как нужно.\n\n"
+                    "Если заказ уже оформлен — напишите, отправлю фото."
+                )
+
             state["response"] += " ||phase:N13_photo_approval||"
             state["collected_data"] = collected
-            logger.info("N13_photo: first request %s", self._user_context(state))
+            logger.info("N13_photo: first request (returning=%s) %s", is_returning, self._user_context(state))
             return self._wrap_response(state)
 
-        # Если клиент недоволен фото → эскалация
+        # Если клиент недоволен фото → пересоберём или эскалация
         text = state["user_input"].lower()
         if any(w in text for w in ("не нравит", "не то", "не так", "плох", "переделай")):
             collected["escalation_reason"] = "photo_dispute"
             state["collected_data"] = collected
             state["phase"] = "N12_escalated"
             state["response"] = (
-                "Сейчас уточню и вернусь к вам."
+                "Пересоберём и покажем другие варианты — "
+                "мы за результат, который радует."
             )
             state["response"] += " ||phase:N12_escalated||"
             logger.info("N13_photo → N12 (dispute) %s", self._user_context(state))
@@ -1542,8 +1663,12 @@ class FlowerLogic:
         state["phase"] = "N15_close"
         state["response"] = (
             "Спасибо за заказ! Надеемся, букет порадует получателя 🌸\n\n"
-            "_Гарантия свежести:_ если что-то не так — "
-            "напишите, поможем."
+            "Если в будущем понадобится:\n"
+            "— оформление цветами отеля\n"
+            "— встреча с букетом\n"
+            "— салют или личные поручения\n"
+            "— просто напишите.\n\n"
+            "Будем рады помочь в любой ситуации."
         )
         state["response"] += " ||phase:N15_close||"
         logger.info("N14_delivery_exec → N15_close %s", self._user_context(state))
@@ -1588,18 +1713,31 @@ class FlowerLogic:
 
         collected = state.get("collected_data", {})
 
-        state["response"] = (
-            "💳 Способы оплаты:\n\n"
-            "• 💸 Перевод на карту\n"
-            "• 🔗 Ссылка на оплату\n"
-            "• 💵 Наличные при получении\n"
-            "• 🏢 Работаем с юрлицами\n\n"
-            "Условия:\n"
-            "• Для новых клиентов — предоплата\n"
-            "• Постоянным/по рекомендации — оплата при получении\n"
-            "• Можно поставить в работу до оплаты\n\n"
-            "Как вам удобнее оплатить?"
-        )
+        # Определяем — новый или постоянный клиент
+        is_new = not collected.get("is_returning")
+
+        if is_new:
+            state["response"] = (
+                "💳 Для оформления заказа необходима предоплата.\n\n"
+                "Способы оплаты:\n"
+                "• 💸 Перевод на карту (Сбер / Тинькофф)\n"
+                "• 🔗 Ссылка на оплату\n"
+                "• 💵 Наличные при получении — только для постоянных клиентов\n\n"
+                "📋 Правила:\n"
+                "• Новый заказ запускается в работу после оплаты\n"
+                "• Композиция от 15 000 ₽ с самовывозом — возможна 50% предоплата\n"
+                "• Юрлица — оплата по реквизитам\n\n"
+                "Как вам удобнее оплатить?"
+            )
+        else:
+            state["response"] = (
+                "💳 Способы оплаты:\n\n"
+                "• 💸 Перевод на карту (Сбер / Тинькофф)\n"
+                "• 🔗 Ссылка на оплату\n"
+                "• 💵 Наличные при получении\n"
+                "• 🏢 Юрлица — оплата по реквизитам\n\n"
+                "Как вам удобнее?"
+            )
 
         state["phase"] = "N13_photo"
         state["collected_data"] = collected
