@@ -98,7 +98,7 @@ class FlowerLogic:
             self.intent_llm = ChatOpenAI(
                 api_key=self.AUTHORIZATION_KEY,
                 base_url=self.GLM_BASE_URL,
-                model="glm-4-flash",
+                model="glm-4-flash-250414",
                 temperature=0.1,
                 max_tokens=512,
             )
@@ -785,6 +785,15 @@ class FlowerLogic:
                        "подбери", "на ваш вкус", "любой", "без разницы")
         is_vague = any(w in text for w in vague_words)
 
+        # Если бюджет пропущен — ставим дефолт чтобы не зациклиться
+        if collected.get("budget_skipped") and not collected.get("budget_max"):
+            collected["budget_min"] = 5000.0
+            collected["budget_max"] = 15000.0
+
+        # Если повод пропущен — отмечаем чтобы не спрашивать
+        if collected.get("occasion_skipped") and not collected.get("occasion"):
+            collected["occasion"] = "не указан"
+
         # Сохраняем данные из сообщения
         if entities.get("max_price") or entities.get("min_price"):
             bmin, bmax = self._normalize_budget_range(
@@ -864,60 +873,62 @@ class FlowerLogic:
 
         if not collected.get("occasion") and not collected.get("recipient") and not collected.get("budget_skipped"):
             if is_vague:
-                # Пропускаем вопрос про повод
                 collected["occasion_skipped"] = True
             if not collected.get("occasion_skipped"):
                 state["phase"] = "N2_brief_occasion"
                 state["keyboard"] = ["Девушке", "Маме", "Коллеге", "Свадьба", "День рождения"]
-                state["response"] = (
-                    "К какому поводу и кому выбираем?"
-            )
-            state["response"] += " ||phase:N2_brief_occasion||"
-            logger.info("N2_brief: ask occasion %s", self._user_context(state))
-            return self._wrap_response(state)
+                state["response"] = "К какому поводу и кому выбираем?"
+                state["response"] += " ||phase:N2_brief_occasion||"
+                logger.info("N2_brief: ask occasion %s", self._user_context(state))
+                return self._wrap_response(state)
+            # occasion пропущен — идём дальше
+            collected["occasion"] = "не указан"
 
         if not collected.get("product_type"):
-            state["phase"] = "N2_brief_format"
-            state["keyboard"] = ["Букет", "Композиция (коробка/корзина)", "Кашпо"]
-            state["response"] = (
-                "Что вам ближе: букет, композиция или кашпо?"
-            )
-            state["response"] += " ||phase:N2_brief_format||"
-            logger.info("N2_brief: ask format %s", self._user_context(state))
-            return self._wrap_response(state)
+            if is_vague:
+                collected["product_type"] = "букет"
+            else:
+                state["phase"] = "N2_brief_format"
+                state["keyboard"] = ["Букет", "Композиция (коробка/корзина)", "Кашпо"]
+                state["response"] = "Что вам ближе: букет, композиция или кашпо?"
+                state["response"] += " ||phase:N2_brief_format||"
+                logger.info("N2_brief: ask format %s", self._user_context(state))
+                return self._wrap_response(state)
 
         if not collected.get("gamma"):
-            state["phase"] = "N2_brief_gamma"
-            state["keyboard"] = ["Нежно-пастельный", "Яркий/насыщенный"]
-            state["response"] = (
-                "Какой стиль предпочитаете?"
-            )
-            state["response"] += " ||phase:N2_brief_gamma||"
-            logger.info("N2_brief: ask gamma %s", self._user_context(state))
-            return self._wrap_response(state)
+            if is_vague:
+                collected["gamma"] = "не указан"
+            else:
+                state["phase"] = "N2_brief_gamma"
+                state["keyboard"] = ["Нежно-пастельный", "Яркий/насыщенный"]
+                state["response"] = "Какой стиль предпочитаете?"
+                state["response"] += " ||phase:N2_brief_gamma||"
+                logger.info("N2_brief: ask gamma %s", self._user_context(state))
+                return self._wrap_response(state)
 
         if "restrictions_asked" not in collected:
-            collected["restrictions_asked"] = True
-            state["phase"] = "N2_brief_restrictions"
-            state["keyboard"] = ["Нет ограничений", "Без лилий", "Без резкого аромата"]
-            state["response"] = (
-                "Есть ли цветы, которые точно нельзя?\n"
-                "(аллергии, запах, кошки, лилии и т.п.)"
-            )
-            state["response"] += " ||phase:N2_brief_restrictions||"
-            logger.info("N2_brief: ask restrictions %s", self._user_context(state))
-            return self._wrap_response(state)
+            if is_vague:
+                collected["restrictions_asked"] = True
+            else:
+                collected["restrictions_asked"] = True
+                state["phase"] = "N2_brief_restrictions"
+                state["keyboard"] = ["Нет ограничений", "Без лилий", "Без резкого аромата"]
+                state["response"] = "Есть ли цветы, которые точно нельзя?\n(аллергии, запах, кошки, лилии и т.п.)"
+                state["response"] += " ||phase:N2_brief_restrictions||"
+                logger.info("N2_brief: ask restrictions %s", self._user_context(state))
+                return self._wrap_response(state)
 
         if not collected.get("size") and "size_asked" not in collected:
-            collected["size_asked"] = True
-            state["phase"] = "N2_brief_restrictions"
-            state["keyboard"] = ["Компактный (S)", "Средний (M)", "Пышный (L)"]
-            state["response"] = (
-                "Какой размер предпочитаете?"
-            )
-            state["response"] += " ||phase:N2_brief_restrictions||"
-            logger.info("N2_brief: ask size %s", self._user_context(state))
-            return self._wrap_response(state)
+            if is_vague:
+                collected["size_asked"] = True
+            else:
+                collected["size_asked"] = True
+                state["phase"] = "N2_brief_restrictions"
+                state["keyboard"] = ["Компактный (S)", "Средний (M)", "Пышный (L)"]
+                state["response"] = "Какой размер предпочитаете?"
+                state["response"] += " ||phase:N2_brief_restrictions||"
+                logger.info("N2_brief: ask size %s", self._user_context(state))
+                return self._wrap_response(state)
 
         if "reference_asked" not in collected:
             collected["reference_asked"] = True
