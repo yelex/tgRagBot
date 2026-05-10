@@ -5,7 +5,8 @@ services:
     restart: unless-stopped
     environment:
       TELEGRAM_TOKEN: ${TELEGRAM_TOKEN}
-      AUTHORIZATION_KEY: ${AUTHORIZATION_KEY}
+      GLM_API_KEY: ${GLM_API_KEY}
+      GLM_BASE_URL: ${GLM_BASE_URL:-https://open.bigmodel.cn/api/paas/v4}
       PATH_MESSAGES: ${PATH_MESSAGES:-/app/data/test.txt}
       PATH_BOUQUETS: ${PATH_BOUQUETS:-/app/data/bouquets.json}
       PATH_SYSTEM_PROMPT: ${PATH_SYSTEM_PROMPT:-/app/prompts/system_prompt.txt}

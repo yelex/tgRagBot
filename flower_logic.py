@@ -5,7 +5,7 @@ import re
 from typing import Any, Dict, List, Literal, Optional, TypedDict
 
 from dotenv import load_dotenv
-from langchain_gigachat.chat_models import GigaChat
+from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
 
 from interfaces import mysql_interface
@@ -58,7 +58,8 @@ ALLOWED_PHASES = {
 class FlowerLogic:
     def __init__(self):
         self.PATH_BOUQUETS = os.getenv("PATH_BOUQUETS")
-        self.AUTHORIZATION_KEY = os.getenv("AUTHORIZATION_KEY")
+        self.AUTHORIZATION_KEY = os.getenv("GLM_API_KEY")
+        self.GLM_BASE_URL = os.getenv("GLM_BASE_URL", "https://open.bigmodel.cn/api/paas/v4")
         self.bouquets_info: str = ""
         self.bouquets_data: List[Dict[str, Any]] = []
         self.intent_llm: Optional[GigaChat] = None
@@ -94,10 +95,12 @@ class FlowerLogic:
             self.intent_llm = None
             return
         try:
-            self.intent_llm = GigaChat(
-                verify_ssl_certs=False,
-                credentials=self.AUTHORIZATION_KEY,
-                model="GigaChat-2-Max",
+            self.intent_llm = ChatOpenAI(
+                api_key=self.AUTHORIZATION_KEY,
+                base_url=self.GLM_BASE_URL,
+                model="glm-4-flash",
+                temperature=0.1,
+                max_tokens=512,
             )
             logger.info("Intent LLM инициализирован.")
         except Exception as exc:
