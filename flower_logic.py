@@ -573,6 +573,7 @@ class FlowerLogic:
         text = state["user_input"].lower()
 
         has_greeting = any(m in text for m in ("привет", "здравствуйте", "добрый", "hello"))
+        has_greeting = any(m in text for m in ("привет", "здравствуй", "добрый", "доброе", "хай", "хелло", "hello", "hi"))
         has_catalog = any(m in text for m in ("каталог", "все букеты", "покажи все", "ассортимент"))
         has_flower = any(m in text for m in ("букет", "цвет", "роз", "пион", "тюльпан"))
         has_delivery = any(m in text for m in ("достав", "привезти", "везете", "мкад"))
@@ -589,6 +590,9 @@ class FlowerLogic:
         has_owner = any(m in text for m in ("позов", "владельц", "хозяин", "соедин", "менеджер"))
         has_pickup = any(m in text for m in ("самовывоз", "заберу", "подъеду"))
         has_reference = any(m in text for m in ("референс", "как на фото", "пример"))
+        has_more = any(m in text for m in ("больше", "ещё", "еще", "показать еще", "покажи еще", "дальше", "следующие"))
+        has_agreement = any(m in text for m in ("да", "хочу", "давай", "хорошо", "подходит", "ок", "согласен", "нравит", "го"))
+        has_dislike = any(m in text for m in ("не то", "не нравит", "другой", "не подходит", "нет"))
 
         if has_cancel:
             return "cancel_order"
@@ -706,14 +710,14 @@ class FlowerLogic:
                 state["phase"] = "N3_catalog"
                 return self._N3_catalog_node(state)
 
-            # Общая реакция
+            # Общая реакция — спрашиваем пожелания, а не сразу бюджет
             state["phase"] = "N2_brief"
             state["response"] = (
-                "Подскажите, на какой бюджет рассчитываете? "
-                "Минимальный заказ — 5 000 ₽."
+                "Подскажите, какие у Вас пожелания к букету?\n"
+                "Например: повод, любимые цветы, цветовая гамма, бюджет."
             )
             state["response"] += " ||phase:N2_brief_budget||"
-            logger.info("N0_greet → N2_brief (budget question) %s", self._user_context(state))
+            logger.info("N0_greet → N2_brief (general wishes) %s", self._user_context(state))
             return state
 
         # Первое приветствие
@@ -771,6 +775,13 @@ class FlowerLogic:
         text = state["user_input"].lower()
         phase = state.get("phase", "N2_brief_budget")
 
+        # Обработка общих ответов, которые не содержат полезных данных
+        # чтобы не зациклиться на одном вопросе
+        vague_words = ("больше", "ещё", "еще", "да", "нет", "ок", "хорошо",
+                       "давай", "продолж", "дальше", "не знаю", "посоветуй",
+                       "подбери", "на ваш вкус", "любой", "без разницы")
+        is_vague = any(w in text for w in vague_words)
+
         # Сохраняем данные из сообщения
         if entities.get("max_price") or entities.get("min_price"):
             bmin, bmax = self._normalize_budget_range(
@@ -813,7 +824,20 @@ class FlowerLogic:
         budget_ok = budget >= 5000 or (collected.get("budget_min") and collected["budget_min"] >= 5000)
 
         # Определяем, какой вопрос задать
+        # Если ответ размытый ("больше", "ещё", "да") — пропускаем текущий вопрос
         if not collected.get("budget_max") and not collected.get("budget_min"):
+            if is_vague:
+                # Клиент не хочет называть бюджет — подбираем на наш вкус
+                collected["budget_skipped"] = True
+                state["response"] = (
+                    "Понял! Подберу на наш вкус.\n"
+                    "Кому и по какому поводу выбираем?"
+                )
+                state["phase"] = "N2_brief_occasion"
+                state["response"] += " ||phase:N2_brief_occasion||"
+                state["collected_data"] = collected
+                logger.info("N2_brief: budget skipped (vague), ask occasion %s", self._user_context(state))
+                return self._wrap_response(state)
             state["phase"] = "N2_brief_budget"
             state["response"] = (
                 "На какой бюджет ориентируемся? "
@@ -835,11 +859,15 @@ class FlowerLogic:
             logger.info("N2_brief: budget too low %s", self._user_context(state))
             return self._wrap_response(state)
 
-        if not collected.get("occasion") and not collected.get("recipient"):
-            state["phase"] = "N2_brief_occasion"
-            state["keyboard"] = ["Девушке", "Маме", "Коллеге", "Свадьба", "День рождения"]
-            state["response"] = (
-                "К какому поводу и кому выбираем?"
+        if not collected.get("occasion") and not collected.get("recipient") and not collected.get("budget_skipped"):
+            if is_vague:
+                # Пропускаем вопрос про повод
+                collected["occasion_skipped"] = True
+            if not collected.get("occasion_skipped"):
+                state["phase"] = "N2_brief_occasion"
+                state["keyboard"] = ["Девушке", "Маме", "Коллеге", "Свадьба", "День рождения"]
+                state["response"] = (
+                    "К какому поводу и кому выбираем?"
             )
             state["response"] += " ||phase:N2_brief_occasion||"
             logger.info("N2_brief: ask occasion %s", self._user_context(state))
