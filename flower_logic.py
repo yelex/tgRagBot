@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import re
+import time
 from typing import Any, Dict, List, Literal, Optional, TypedDict
 
 from dotenv import load_dotenv
@@ -58,13 +59,15 @@ ALLOWED_PHASES = {
 class FlowerLogic:
     def __init__(self):
         self.PATH_BOUQUETS = os.getenv("PATH_BOUQUETS")
-        self.AUTHORIZATION_KEY = os.getenv("GLM_API_KEY")
+        self.GLM_API_KEY = os.getenv("GLM_API_KEY")
         self.GLM_BASE_URL = os.getenv("GLM_BASE_URL", "https://open.bigmodel.cn/api/paas/v4")
+        self.GLM_MODEL = os.getenv("GLM_MODEL")
         self.bouquets_info: str = ""
         self.bouquets_data: List[Dict[str, Any]] = []
-        self.intent_llm: Optional[GigaChat] = None
+        self.intent_llm: Optional[ChatOpenAI] = None
         self.graph = None
         self._last_bouquets: Dict[int, List[Dict[str, Any]]] = {}
+        self.nlu_cache: Dict[str, Dict[str, Any]] = {}
         self.initialize_components()
 
     # ──────────────────────────────────────────────
@@ -90,15 +93,15 @@ class FlowerLogic:
         print("✅ LangGraph-агент v2 готов!")
 
     def _initialize_intent_llm(self):
-        if not self.AUTHORIZATION_KEY:
+        if not self.GLM_API_KEY:
             logger.warning("AUTHORIZATION_KEY не задан, intent LLM отключен.")
             self.intent_llm = None
             return
         try:
             self.intent_llm = ChatOpenAI(
-                api_key=self.AUTHORIZATION_KEY,
+                api_key=self.GLM_API_KEY,
                 base_url=self.GLM_BASE_URL,
-                model="glm-4-flash-250414",
+                model=self.GLM_MODEL,
                 temperature=0.1,
                 max_tokens=512,
             )
@@ -452,79 +455,31 @@ class FlowerLogic:
         if self.intent_llm is None:
             return {"intent": "unknown", "entities": {}}
 
+        cache_key = state["user_input"].strip().lower()
+        if cache_key in self.nlu_cache:
+            return self.nlu_cache[cache_key]
+
         phase = state.get("phase", "init")
         prompt = f"""
-Ты NLU-модуль для цветочного Telegram-бота (darkstore, Москва, доставка 24/7).
-Определи intent и извлеки сущности из сообщения с учетом истории.
+Ты NLU-модуль для цветочного бота. Определи intent и сущности.
 
-Текущая фаза диалога: {phase}
+Доступные intent: greet, catalog, recommend, chosen_by_name, delivery_info, payment_info, complaint, urgent, occasion, photo_request, change_order, cancel_order, repeat_order, contact_owner, faq, unknown.
 
-Доступные intent:
-- greet — приветствие без конкретного запроса
-- greet_and_offer — приветствие + запрос букета
-- catalog — просьба показать каталог
-- recommend — просьба подобрать по бюджету/описанию
-- chosen_by_name — запрос конкретного букета по названию
-- delivery_info — вопросы о доставке (стоимость, зоны, время)
-- payment_info — вопросы об оплате
-- complaint — претензия/жалоба
-- urgent — срочная доставка
-- corporate — корпоративный/ивент-заказ
-- occasion — подбор по поводу (свадьба, др, маме)
-- photo_request — запрос фото
-- change_order — изменить заказ
-- cancel_order — отменить заказ
-- repeat_order — повторный заказ
-- contact_owner — позвать владельца
-- faq — вопросы о политике
-- pickup — самовывоз
-- scheduled — доставка ко времени
-- reference — референс/фото-пример
-- status — статус заказа
-- unknown — неопределено
+Извлечение цен: "до X тыс" → max_price=X*1000, "от X тыс" → min_price=X*1000.
 
-Извлечение цен:
-- "до X тыс" → max_price = X*1000
-- "от X тыс" → min_price = X*1000
-- "от X до Y тыс" → min_price = X*1000, max_price = Y*1000
+Ответ JSON: {{"intent": "...", "entities": {{"max_price": null, "min_price": null, "name_query": null, "query_text": "...", "occasion": null, "urgent": null, "complaint_type": null, "photo_request": null, "product_type": null, "delivery_time": null, "address": null, "gamma": null, "recipient": null, "card_text": null}}}}
 
-Ответ строго JSON:
-{{
-  "intent": "...",
-  "entities": {{
-    "max_price": number|null,
-    "min_price": number|null,
-    "name_query": "string|null",
-    "query_text": "string",
-    "occasion": "string|null",
-    "urgent": true|false|null,
-    "complaint_type": "wilted|bad_looking|wrong_flowers|delivery|other|null",
-    "corporate_size": number|null,
-    "change_request": "address|time|composition|other|null",
-    "photo_request": true|false|null,
-    "repeat_reference": "string|null",
-    "pickup": true|false|null,
-    "product_type": "bouquet|composition|box|basket|null",
-    "delivery_time": "asap|scheduled|night|null",
-    "address": "string|null",
-    "gamma": "pastel|bright|null",
-    "recipient": "string|null",
-    "card_text": "string|null",
-    "anonymous": true|false|null,
-    "critical_flower": "string|null",
-    "critical_color": "string|null"
-  }}
-}}
+История: {state["full_conversation_text"]}
 
-История:
-{state["full_conversation_text"]}
-
-Последнее сообщение:
-{state["user_input"]}
+Сообщение: {state["user_input"]}
 """.strip()
 
         try:
+            start_time = time.time()
             llm_result = self.intent_llm.invoke(prompt)
+            end_time = time.time()
+            logger.info(f"LLM call took {end_time - start_time:.2f} seconds")
+            time.sleep(1)  # Rate limiting to avoid 429 errors
             content = getattr(llm_result, "content", "") if llm_result is not None else ""
             if isinstance(content, list):
                 content = " ".join(str(item) for item in content)
@@ -566,6 +521,7 @@ class FlowerLogic:
                 "NLU LLM: intent=%s entities=%s %s",
                 intent, entities, self._user_context(state),
             )
+            self.nlu_cache[cache_key] = {"intent": intent, "entities": entities}
             return {"intent": intent, "entities": entities}
 
         except Exception as exc:
@@ -1917,6 +1873,9 @@ class FlowerLogic:
 
         if not history_lines or not history_lines[-1].endswith(user_input):
             history_lines.append(f"user: {user_input}")
+
+        # Limit history to last 10 messages to prevent memory issues
+        history_lines = history_lines[-10:]
 
         full_conversation_text = "\n".join(history_lines)
         logger.info(

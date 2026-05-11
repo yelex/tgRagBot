@@ -7,6 +7,7 @@ services:
       TELEGRAM_TOKEN: ${TELEGRAM_TOKEN}
       GLM_API_KEY: ${GLM_API_KEY}
       GLM_BASE_URL: ${GLM_BASE_URL:-https://open.bigmodel.cn/api/paas/v4}
+      GLM_MODEL: ${GLM_MODEL}
       PATH_MESSAGES: ${PATH_MESSAGES:-/app/data/test.txt}
       PATH_BOUQUETS: ${PATH_BOUQUETS:-/app/data/bouquets.json}
       PATH_SYSTEM_PROMPT: ${PATH_SYSTEM_PROMPT:-/app/prompts/system_prompt.txt}
@@ -15,6 +16,12 @@ services:
       MYSQL_USER: ${MYSQL_USER}
       MYSQL_PASSWORD: ${MYSQL_PASSWORD}
       MYSQL_DATABASE: ${MYSQL_DATABASE}
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+        reservations:
+          memory: 512m
     volumes:
       - ./data:/app/data
       - ./prompts:/app/prompts
