@@ -10,6 +10,7 @@ from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
 
 from interfaces import mysql_interface
+from interfaces.mysql_interface import create_order, update_order, get_active_order
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -1295,6 +1296,30 @@ class FlowerLogic:
         bouquets = state["bouquets_data"]
         user_id = state.get("user_id")
 
+        # Если клиент выбрал букет по имени — сохраняем и переходим к доставке
+        name_query = entities.get("name_query", "")
+        if name_query and state.get("phase") == "N9_offer":
+            match = next(
+                (b for b in bouquets if name_query.lower() in b["Название"].lower()),
+                None,
+            )
+            if match:
+                collected["bouquet_name"] = match["Название"]
+                collected["bouquet_price"] = match["Цена"]
+                state["collected_data"] = collected
+                state["phase"] = "N10_delivery"
+                state["response"] = (
+                    f"Отлично, {match['Название']} — хороший выбор!\n\n"
+                    "Теперь нужны данные для доставки.\n"
+                    "Напишите адрес доставки."
+                )
+                state["response"] += f" ||phase:N10_delivery|| ||data:{json.dumps(collected, ensure_ascii=False)}||"
+                logger.info(
+                    "N9_offer: bouquet chosen '%s' → N10_delivery %s",
+                    match["Название"], self._user_context(state),
+                )
+                return state
+
         max_price = collected.get("budget_max") or entities.get("max_price")
         min_price = collected.get("budget_min") or entities.get("min_price")
 
@@ -1486,18 +1511,25 @@ class FlowerLogic:
             logger.info("N10_delivery: ask address %s", self._user_context(state))
             return self._wrap_response(state)
 
-        # Адрес есть — показываем итог с правилами ожидания
+        # Адрес есть — сохраняем delivery_cost, создаём/обновляем заказ в БД
+        collected["delivery_cost"] = delivery_cost
+        state["collected_data"] = collected
+        state = self._upsert_order(state)
+        collected = state["collected_data"]
+
+        order_id = collected.get("order_id", "—")
         state["response"] = (
             f"{delivery_line}\n\n"
             "📋 Подтвердите детали заказа:\n"
             f"📍 Адрес: {collected['address']}\n"
             "⏰ Время: уточним\n\n"
             "⏱ Курьер ожидает 15 минут бесплатно, далее 100 ₽ за каждые 10 минут.\n\n"
+            f"Номер заказа: #{order_id}\n\n"
             "Всё верно? Переходим к оплате?"
         )
         state["phase"] = "payment"
         state["collected_data"] = collected
-        state["response"] += " ||phase:payment||"
+        state["response"] += f" ||phase:payment|| ||data:{json.dumps(collected, ensure_ascii=False)}||"
         logger.info("N10_delivery: address collected → payment %s", self._user_context(state))
         return state
 
@@ -1630,7 +1662,8 @@ class FlowerLogic:
             logger.info("N13_photo → N12 (dispute) %s", self._user_context(state))
             return state
 
-        # Фото одобрено → доставка
+        # Фото одобрено → заказ в работу
+        self._set_order_status(state, "in_progress")
         state["phase"] = "N14_delivery_exec"
         state["collected_data"] = collected
         state["response"] = "Отлично! Передаю курьеру."
@@ -1658,6 +1691,7 @@ class FlowerLogic:
             logger.info("N14_delivery_exec → N12 (conflict) %s", self._user_context(state))
             return state
 
+        self._set_order_status(state, "delivery")
         state["phase"] = "N15_close"
         state["response"] = (
             "Спасибо за заказ! Надеемся, букет порадует получателя 🌸\n\n"
@@ -1678,6 +1712,7 @@ class FlowerLogic:
 
     def _N15_close_node(self, state: AgentState) -> AgentState:
         logger.info("Agent node enter: N15_close %s", self._user_context(state))
+        self._set_order_status(state, "delivered")
 
         # Проверка фоллоу-ап
         text = state["user_input"].lower()
@@ -1783,6 +1818,52 @@ class FlowerLogic:
         if keyboard:
             state["response"] += f" ||keyboard:{json.dumps(keyboard, ensure_ascii=False)}||"
         return state
+
+    def _upsert_order(self, state: AgentState) -> AgentState:
+        """Создаёт заказ в БД при первом вызове, обновляет при повторном.
+        order_id сохраняется в collected_data для персистентности."""
+        collected = state.get("collected_data", {})
+        user_id = state.get("user_id")
+        if user_id is None:
+            return state
+        try:
+            order_id = collected.get("order_id")
+            if order_id:
+                update_order(
+                    order_id,
+                    bouquet_name=collected.get("bouquet_name"),
+                    bouquet_price=collected.get("bouquet_price"),
+                    delivery_address=collected.get("address"),
+                    delivery_date=collected.get("delivery_date"),
+                    delivery_time=collected.get("delivery_time"),
+                    recipient_phone=collected.get("recipient_phone"),
+                    card_text=collected.get("card_text"),
+                    delivery_cost=collected.get("delivery_cost", 0),
+                    total_cost=(collected.get("bouquet_price") or 0) + (collected.get("delivery_cost") or 0),
+                )
+            else:
+                order_id = create_order(
+                    user_id=user_id,
+                    user_name=state.get("user_name"),
+                    data=collected,
+                )
+                collected["order_id"] = order_id
+                state["collected_data"] = collected
+            logger.info("Order upserted: order_id=%s uid=%s", order_id, user_id)
+        except Exception as exc:
+            logger.exception("Failed to upsert order: %s", exc)
+        return state
+
+    def _set_order_status(self, state: AgentState, status: str) -> None:
+        """Обновляет статус заказа в БД. Не прерывает поток при ошибке."""
+        order_id = state.get("collected_data", {}).get("order_id")
+        if not order_id:
+            return
+        try:
+            update_order(order_id, order_status=status)
+            logger.info("Order status → %s: order_id=%s", status, order_id)
+        except Exception as exc:
+            logger.exception("Failed to update order status: %s", exc)
 
     @staticmethod
     def _normalize_budget_range(min_price: Optional[float], max_price: Optional[float]):
