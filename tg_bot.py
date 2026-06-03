@@ -62,6 +62,7 @@ class TelegramBot:
         self.application.add_handler(CommandHandler("prices", self.show_price_ranges))
         self.application.add_handler(CallbackQueryHandler(self.handle_price_range, pattern="^price_"))
         self.application.add_handler(CallbackQueryHandler(self.handle_more_bouquets, pattern="^more_"))
+        self.application.add_handler(MessageHandler(filters.PHOTO, self.handle_photo))
         self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
         logger.info("Обработчики команд зарегистрированы")
 
@@ -345,6 +346,40 @@ class TelegramBot:
             logger.error(f"Ошибка при обработке сообщения: {e}", exc_info=True)
             await update.message.reply_text(
                 "Произошла ошибка при обработке запроса. Попробуйте позже."
+            )
+
+    async def handle_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+        user_name = (
+            update.effective_user.username
+            or update.effective_user.full_name
+            or update.effective_user.first_name
+        )
+        caption = update.message.caption or ""
+        logger.info(f"Получено фото от {user_id} ({user_name}), caption={caption!r}")
+
+        try:
+            photo = update.message.photo[-1]
+            file = await context.bot.get_file(photo.file_id)
+            photo_bytes = bytes(await file.download_as_bytearray())
+
+            raw_history = self._get_conversation_history(user_id)
+            response = self.flower_logic.handle_photo_message(
+                user_id=user_id,
+                user_name=user_name,
+                photo_bytes=photo_bytes,
+                caption=caption,
+                conversation_history=raw_history,
+            )
+            self._add_to_history(user_id, "user", f"[фото] {caption}".strip())
+            self._add_to_history(user_id, "assistant", response)
+            await self._send_response(update, response)
+            logger.info(f"Ответ на фото отправлен пользователю {user_id}")
+
+        except Exception as e:
+            logger.error(f"Ошибка при обработке фото: {e}", exc_info=True)
+            await update.message.reply_text(
+                "Не смог обработать фото. Попробуйте описать букет словами."
             )
 
     async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
