@@ -49,6 +49,16 @@ class NLUDecision(BaseModel):
     delivery_time: Optional[str] = Field(None, description="Время доставки")
     recipient_phone: Optional[str] = Field(None, description="Телефон получателя")
     card_text: Optional[str] = Field(None, description="Текст открытки")
+    payment_method: Optional[str] = Field(
+        None,
+        description=(
+            "Способ оплаты, если клиент его уточняет. Значения: "
+            "'legal_entity' — юрлицо, реквизиты, счёт, договор, ИНН, ООО, ИП, безнал; "
+            "'card' — карта, Сбер, Тинькофф; "
+            "'cash' — наличные; "
+            "'link' — ссылка на оплату, онлайн."
+        ),
+    )
 
 
 class AgentState(TypedDict):
@@ -383,6 +393,12 @@ class FlowerLogic:
 
 ТЕКУЩАЯ ФАЗА: {current_phase}
 СОБРАННЫЕ ДАННЫЕ: {collected_summary}
+
+ПРАВИЛА ИЗВЛЕЧЕНИЯ СПОСОБА ОПЛАТЫ (payment_method):
+• Юрлицо / реквизиты / счёт / договор / ИНН / ООО / ИП / безнал / накладная → 'legal_entity'
+• Карта / Сбер / Тинькофф / перевод → 'card'
+• Наличные / нал / курьеру → 'cash'
+• Ссылка / онлайн / QR → 'link'
 
 ПРАВИЛА ИЗВЛЕЧЕНИЯ БЮДЖЕТА:
 • "X рублей" / "X тысяч" без слова "от" → max_price=X (не min_price!)
@@ -1653,42 +1669,10 @@ class FlowerLogic:
     # N13 — Фото перед доставкой
     # ──────────────────────────────────────────────
 
-    _LEGAL_PAYMENT_KEYWORDS = (
-        "юрлиц", "юридическ", "реквизит", "по счёт", "счёт на оплат",
-        "счёт-факт", "ооо", "зао", "пао", " ип ", "инн", "договор", "накладн",
-    )
-
     def _N13_photo_node(self, state: AgentState) -> AgentState:
         logger.info("Agent node enter: N13_photo %s", self._user_context(state))
 
         collected = state.get("collected_data", {})
-        text_lower = state["user_input"].lower()
-
-        # Уточнение способа оплаты (юрлицо, реквизиты и т.п.) — отвечаем здесь,
-        # не теряя контекст заказа
-        if any(kw in text_lower for kw in self._LEGAL_PAYMENT_KEYWORDS):
-            order_id = collected.get("order_id")
-            order_line = f" (заказ #{order_id})" if order_id else ""
-            state["response"] = (
-                f"🏢 Оплата для юридических лиц{order_line}:\n\n"
-                "Выставляем счёт на основании договора.\n\n"
-                "Для оформления нам понадобятся:\n"
-                "• Название организации\n"
-                "• ИНН\n"
-                "• Юридический адрес\n\n"
-                "Напишите реквизиты — менеджер подготовит счёт и договор."
-            )
-            # Уведомляем оператора — юрлица требуют ручного оформления
-            collected["escalation_reason"] = "corporate_payment"
-            state["collected_data"] = collected
-            state["phase"] = "N12_escalated"
-            state["response"] += (
-                f" ||phase:N12_escalated||"
-                f" ||escalate:{json.dumps({'reason': 'corporate_payment', 'order_id': order_id}, ensure_ascii=False)}||"
-            )
-            logger.info("N13_photo: legal entity payment → operator %s", self._user_context(state))
-            return state
-
         is_returning = collected.get("is_returning")
 
         if "photo_requested" not in collected:
@@ -1811,6 +1795,30 @@ class FlowerLogic:
         logger.info("Agent node enter: payment %s", self._user_context(state))
 
         collected = state.get("collected_data", {})
+        entities = state.get("entities", {})
+
+        # Юрлицо — оформление по реквизитам, нужен оператор
+        if entities.get("payment_method") == "legal_entity":
+            order_id = collected.get("order_id")
+            order_line = f" (заказ #{order_id})" if order_id else ""
+            state["response"] = (
+                f"🏢 Оплата для юридических лиц{order_line}:\n\n"
+                "Выставляем счёт на основании договора.\n\n"
+                "Для оформления нам понадобятся:\n"
+                "• Название организации\n"
+                "• ИНН\n"
+                "• Юридический адрес\n\n"
+                "Напишите реквизиты — менеджер подготовит счёт и договор."
+            )
+            collected["escalation_reason"] = "corporate_payment"
+            state["collected_data"] = collected
+            state["phase"] = "N12_escalated"
+            state["response"] += (
+                f" ||phase:N12_escalated||"
+                f" ||escalate:{json.dumps({'reason': 'corporate_payment', 'order_id': order_id}, ensure_ascii=False)}||"
+            )
+            logger.info("Payment: legal entity → operator %s", self._user_context(state))
+            return state
 
         # Определяем — новый или постоянный клиент
         is_new = not collected.get("is_returning")
