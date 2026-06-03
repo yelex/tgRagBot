@@ -3,8 +3,10 @@ import os
 import logging
 import asyncio
 import re
-from typing import Dict, List, Optional
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional, Set
 from dotenv import load_dotenv
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -31,6 +33,7 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 OPERATOR_CHAT_ID = os.getenv('OPERATOR_CHAT_ID')
+FEEDBACK_DELAY_HOURS = float(os.getenv('FEEDBACK_DELAY_HOURS', '2'))
 
 
 class TelegramBot:
@@ -38,18 +41,16 @@ class TelegramBot:
         self.flower_logic = FlowerLogic()
         self.application = None
         self.conversation_history: Dict[int, List[Dict[str, str]]] = {}
+        self.scheduler = AsyncIOScheduler()
+        self._feedback_scheduled: Set[int] = set()  # user_id → уже запланирован фидбэк
         logger.info("Бот инициализирован")
 
     async def setup_application(self):
         """Асинхронная инициализация и настройка приложения бота"""
-        # Создаем Application
         self.application = Application.builder().token(TELEGRAM_TOKEN).build()
-        
-        # Асинхронная инициализация бота
         await self.application.initialize()
-        
-        # Регистрируем обработчики
         self.register_handlers()
+        self.scheduler.start()
         logger.info("Приложение бота настроено и инициализировано")
 
     def register_handlers(self):
@@ -63,6 +64,7 @@ class TelegramBot:
         self.application.add_handler(CommandHandler("prices", self.show_price_ranges))
         self.application.add_handler(CallbackQueryHandler(self.handle_price_range, pattern="^price_"))
         self.application.add_handler(CallbackQueryHandler(self.handle_more_bouquets, pattern="^more_"))
+        self.application.add_handler(CallbackQueryHandler(self.handle_feedback_callback, pattern="^feedback_"))
         self.application.add_handler(MessageHandler(filters.PHOTO, self.handle_photo))
         self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
         logger.info("Обработчики команд зарегистрированы")
@@ -76,6 +78,81 @@ class TelegramBot:
         if len(self.conversation_history[user_id]) >= 10:
             self.conversation_history[user_id] = self.conversation_history[user_id][-9:]
         self.conversation_history[user_id].append({"role": role, "content": message})
+
+    # ── Background jobs ───────────────────────────────────────────────────────
+
+    def _schedule_feedback(self, user_id: int, order_id: Optional[int] = None):
+        """Планирует запрос фидбэка через FEEDBACK_DELAY_HOURS после доставки."""
+        if user_id in self._feedback_scheduled:
+            return
+        self._feedback_scheduled.add(user_id)
+        run_at = datetime.now() + timedelta(hours=FEEDBACK_DELAY_HOURS)
+        job_id = f"feedback_{user_id}"
+        self.scheduler.add_job(
+            self._send_feedback_request,
+            trigger="date",
+            run_date=run_at,
+            args=[user_id, order_id],
+            id=job_id,
+            replace_existing=True,
+        )
+        logger.info(
+            "Фидбэк запланирован: user_id=%s order_id=%s at=%s",
+            user_id, order_id, run_at.strftime("%H:%M"),
+        )
+
+    async def _send_feedback_request(self, user_id: int, order_id: Optional[int]):
+        """Фоновая задача: отправляет запрос оценки после доставки."""
+        if not self.application:
+            return
+        self._feedback_scheduled.discard(user_id)
+        order_line = f" (заказ #{order_id})" if order_id else ""
+        text = (
+            f"Ваш букет{order_line} уже у получателя!\n\n"
+            "Всё прошло хорошо?"
+        )
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("Да, всё отлично!", callback_data=f"feedback_ok_{user_id}"),
+                InlineKeyboardButton("Есть вопрос", callback_data=f"feedback_issue_{user_id}"),
+            ]
+        ])
+        try:
+            await self.application.bot.send_message(
+                chat_id=user_id,
+                text=text,
+                reply_markup=keyboard,
+            )
+            logger.info("Фидбэк-запрос отправлен: user_id=%s", user_id)
+        except Exception as e:
+            logger.error("Не удалось отправить фидбэк: user_id=%s error=%s", user_id, e)
+
+    async def handle_feedback_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        await query.answer()
+        data = query.data  # feedback_ok_<uid> или feedback_issue_<uid>
+
+        if data.startswith("feedback_ok_"):
+            await query.edit_message_text(
+                "Рады слышать! Если захотите повторить или порекомендовать нас — будем благодарны.\n\n"
+                "Хорошего дня!"
+            )
+            logger.info("Фидбэк положительный: %s", data)
+        elif data.startswith("feedback_issue_"):
+            user_id = update.effective_user.id
+            user_name = update.effective_user.username or update.effective_user.full_name or ""
+            await query.edit_message_text(
+                "Понял, сейчас разберёмся. Напишите, пожалуйста, что случилось."
+            )
+            # Уведомляем оператора
+            await self._notify_operator(
+                context=context,
+                user_id=user_id,
+                user_name=user_name,
+                escalation={"reason": "feedback_negative"},
+                history=self._get_conversation_history(user_id),
+            )
+            logger.info("Негативный фидбэк → оператор: user_id=%s", user_id)
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
@@ -408,6 +485,17 @@ class TelegramBot:
                     )
                 except Exception as e:
                     logger.error("Ошибка при обработке эскалации: %s", e)
+
+            # Планируем фидбэк если заказ доставлен
+            if "||phase:N15_close||" in response:
+                data_match = re.search(r'\|\|data:(\{.*?\})\|\|', response)
+                order_id = None
+                if data_match:
+                    try:
+                        order_id = json.loads(data_match.group(1)).get("order_id")
+                    except (json.JSONDecodeError, ValueError):
+                        pass
+                self._schedule_feedback(user_id, order_id)
 
             # Проверяем, есть ли маркер "показать ещё"
             more_match = re.search(r'\|\|more:(\d+):(\d+)\|\|', response)
