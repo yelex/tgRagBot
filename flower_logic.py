@@ -6,7 +6,7 @@ import time
 from typing import Any, Dict, List, Literal, Optional, TypedDict
 
 from dotenv import load_dotenv
-from langchain_openai import ChatOpenAI
+from langchain_gigachat.chat_models import GigaChat
 from langgraph.graph import END, START, StateGraph
 
 from interfaces import mysql_interface
@@ -60,14 +60,14 @@ ALLOWED_PHASES = {
 class FlowerLogic:
     def __init__(self):
         self.PATH_BOUQUETS = os.getenv("PATH_BOUQUETS")
-        self.GLM_API_KEY = os.getenv("GLM_API_KEY")
-        self.GLM_BASE_URL = os.getenv("GLM_BASE_URL", "https://open.bigmodel.cn/api/paas/v4")
-        self.GLM_MODEL = os.getenv("GLM_MODEL")
-        self.GLM_VISION_MODEL = os.getenv("GLM_VISION_MODEL", "glm-4v-flash")
+        self.GIGACHAT_CREDENTIALS = os.getenv("GIGACHAT_CREDENTIALS")
+        self.GIGACHAT_SCOPE = os.getenv("GIGACHAT_SCOPE", "GIGACHAT_API_PERS")
+        self.GIGACHAT_MODEL = os.getenv("GIGACHAT_MODEL", "GigaChat")
+        self.GIGACHAT_TIMEOUT = int(os.getenv("GIGACHAT_TIMEOUT", "60"))
         self.bouquets_info: str = ""
         self.bouquets_data: List[Dict[str, Any]] = []
-        self.intent_llm: Optional[ChatOpenAI] = None
-        self.vision_llm: Optional[ChatOpenAI] = None
+        self.intent_llm: Optional[GigaChat] = None
+        self.vision_llm = None  # GigaChat vision через file API — не реализован
         self.graph = None
         self._last_bouquets: Dict[int, List[Dict[str, Any]]] = {}
         self.nlu_cache: Dict[str, Dict[str, Any]] = {}
@@ -92,44 +92,27 @@ class FlowerLogic:
         print("🌸 Инициализация LangGraph-агента (v2 — многошаговый диалог)...")
         self.load_bouquets_data()
         self._initialize_intent_llm()
-        self._initialize_vision_llm()
         self.graph = self._build_graph()
         print("✅ LangGraph-агент v2 готов!")
 
     def _initialize_intent_llm(self):
-        if not self.GLM_API_KEY:
-            logger.warning("AUTHORIZATION_KEY не задан, intent LLM отключен.")
+        if not self.GIGACHAT_CREDENTIALS:
+            logger.warning("GIGACHAT_CREDENTIALS не заданы, intent LLM отключен.")
             self.intent_llm = None
             return
         try:
-            self.intent_llm = ChatOpenAI(
-                api_key=self.GLM_API_KEY,
-                base_url=self.GLM_BASE_URL,
-                model=self.GLM_MODEL,
-                temperature=0.1,
+            self.intent_llm = GigaChat(
+                credentials=self.GIGACHAT_CREDENTIALS,
+                scope=self.GIGACHAT_SCOPE,
+                model=self.GIGACHAT_MODEL,
+                verify_ssl_certs=False,
+                timeout=self.GIGACHAT_TIMEOUT,
                 max_tokens=512,
             )
-            logger.info("Intent LLM инициализирован.")
+            logger.info("GigaChat LLM инициализирован: %s", self.GIGACHAT_MODEL)
         except Exception as exc:
-            logger.exception("Не удалось инициализировать intent LLM: %s", exc)
+            logger.exception("Не удалось инициализировать GigaChat LLM: %s", exc)
             self.intent_llm = None
-
-    def _initialize_vision_llm(self):
-        if not self.GLM_API_KEY:
-            self.vision_llm = None
-            return
-        try:
-            self.vision_llm = ChatOpenAI(
-                api_key=self.GLM_API_KEY,
-                base_url=self.GLM_BASE_URL,
-                model=self.GLM_VISION_MODEL,
-                temperature=0.1,
-                max_tokens=512,
-            )
-            logger.info("Vision LLM инициализирован: %s", self.GLM_VISION_MODEL)
-        except Exception as exc:
-            logger.exception("Не удалось инициализировать vision LLM: %s", exc)
-            self.vision_llm = None
 
     # ──────────────────────────────────────────────
     # Построение графа
@@ -2009,108 +1992,19 @@ class FlowerLogic:
         caption: Optional[str],
         conversation_history: Optional[List[Dict[str, str]]] = None,
     ) -> str:
-        """Обрабатывает входящее фото: ищет похожие букеты через vision LLM."""
-        import base64
-
-        # Проверяем наличие ссылки на каталог в caption
-        if caption:
-            for bouquet in self.bouquets_data:
-                if bouquet.get("Ссылка") and bouquet["Ссылка"] in caption:
-                    return self._photo_exact_match_response(bouquet)
-            # Если caption содержит текст — обрабатываем как обычное сообщение
-            if not caption.startswith("http"):
-                return self.get_bouquet_recommendation(
-                    user_input=caption,
-                    user_id=user_id,
-                    user_name=user_name,
-                    conversation_history=conversation_history,
-                )
-
-        # Анализируем фото через vision LLM
-        description = self._analyze_bouquet_photo(photo_bytes)
-        if not description:
-            return (
-                "Получил фото! К сожалению, не смог распознать букет на изображении.\n\n"
-                "Напишите, пожалуйста, что вас привлекло — цветы, цвета, стиль?\n"
-                "Подберу похожий вариант."
+        """Обрабатывает входящее фото. Если есть caption — обрабатываем как текст."""
+        if caption and not caption.startswith("http"):
+            return self.get_bouquet_recommendation(
+                user_input=caption,
+                user_id=user_id,
+                user_name=user_name,
+                conversation_history=conversation_history,
             )
-
-        # Ищем похожие букеты по описанию
-        similar = self._find_similar_by_description(description)
-        return self._photo_response(description, similar)
-
-    def _analyze_bouquet_photo(self, photo_bytes: bytes) -> Optional[str]:
-        """Отправляет фото в vision LLM, возвращает описание букета."""
-        import base64
-        if self.vision_llm is None:
-            logger.warning("Vision LLM не инициализирован, анализ фото недоступен")
-            return None
-        try:
-            from langchain_core.messages import HumanMessage
-            b64 = base64.b64encode(photo_bytes).decode("utf-8")
-            prompt = (
-                "Опиши этот букет коротко (1-2 предложения): "
-                "какие цветы, цвета, стиль оформления. "
-                "Если на фото не букет — напиши 'не букет'."
-            )
-            msg = HumanMessage(content=[
-                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
-                {"type": "text", "text": prompt},
-            ])
-            result = self.vision_llm.invoke([msg])
-            content = getattr(result, "content", "") or ""
-            if isinstance(content, list):
-                content = " ".join(str(c) for c in content)
-            content = str(content).strip()
-            if "не букет" in content.lower():
-                return None
-            logger.info("Photo analysis: %s", content[:100])
-            return content
-        except Exception as exc:
-            logger.exception("Vision LLM error: %s", exc)
-            return None
-
-    def _find_similar_by_description(self, description: str) -> List[Dict[str, Any]]:
-        """Простой keyword-поиск похожих букетов по описанию."""
-        desc_lower = description.lower()
-        scored: List[tuple] = []
-        for b in self.bouquets_data:
-            score = 0
-            name_lower = b.get("Название", "").lower()
-            desc_field = b.get("Описание", "").lower()
-            comp_field = " ".join(b.get("Состав", [])).lower()
-            all_text = f"{name_lower} {desc_field} {comp_field}"
-            for word in desc_lower.split():
-                if len(word) >= 4 and word in all_text:
-                    score += 1
-            if score > 0 and b.get("Цена", 0) > 0:
-                scored.append((score, b))
-        scored.sort(key=lambda x: x[0], reverse=True)
-        return [b for _, b in scored[:3]]
-
-    def _photo_exact_match_response(self, bouquet: Dict[str, Any]) -> str:
-        name = bouquet["Название"]
-        price = int(bouquet["Цена"])
-        link = bouquet.get("Ссылка", "")
         return (
-            f"Да, можем собрать такой букет!\n\n"
-            f"💐 {name} — {price} ₽\n"
-            f"🔗 {link}\n\n"
-            "На какую дату нужна доставка?"
+            "Получил фото! Опишите, пожалуйста, что вас привлекло — "
+            "цветы, цвета, стиль?\n"
+            "Подберу похожий вариант из каталога."
         )
-
-    def _photo_response(self, description: str, similar: List[Dict[str, Any]]) -> str:
-        lines = [
-            f"Вижу букет: {description}\n\n"
-            "Можем собрать похожий! Вот близкие варианты из каталога:\n"
-        ]
-        for i, b in enumerate(similar, 1):
-            price = int(b["Цена"]) if b.get("Цена") else "уточним"
-            lines.append(f"{i}. {b['Название']} — {price} ₽\n   {b.get('Ссылка', '')}")
-        if not similar:
-            lines.append("Подберём индивидуально под ваш запрос.")
-        lines.append("\nНа какой бюджет и дату ориентируемся?")
-        return "\n".join(lines)
 
     def get_more_bouquets(self, user_id: int, start: int, count: int) -> Optional[str]:
         bouquets = self._last_bouquets.get(user_id)
