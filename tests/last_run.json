@@ -1,0 +1,508 @@
+{
+  "summary": {
+    "scenarios_passed": 9,
+    "scenarios_total": 16,
+    "steps_passed": 31,
+    "steps_total": 40,
+    "elapsed_seconds": 176.9
+  },
+  "scenarios": [
+    {
+      "name": "1. Happy path: полная информация → N9_offer → доставка → оплата",
+      "passed": false,
+      "steps": [
+        {
+          "input": "Привет",
+          "phase": "N0_greet",
+          "passed": true,
+          "checks": [
+            "  ✅ phase == 'N0_greet'",
+            "  ✅ response ∋ 'Добрый день'",
+            "  ✅ response ∋ 'Flori Pacco'"
+          ],
+          "response": "Добрый день! Рады приветствовать в Flori Pacco.\n\nПомогу подобрать идеальный букет — напишите ваши пожелания.\nНапример: повод, кому, бюджет, любимые цветы."
+        },
+        {
+          "input": "Хочу букет для мамы на юбилей, бюджет 8000",
+          "phase": "N9_offer",
+          "passed": true,
+          "checks": [
+            "  ✅ phase='N9_offer' ∈ 'N9_offer*'",
+            "  ✅ collected['budget_max'] = '8800.0'",
+            "  ✅ response ∋ 'Вариант'",
+            "  ✅ все цены [7490.0, 7900.0, 7900.0] <= 8800"
+          ],
+          "response": "Подобрал для вас варианты:\n\n✅ Вариант 1\n💐 Букет из 19 белых эустом\n💰 7490 ₽\n🔗 https://floripacco.ru/tproduct/966232652742-buket-iz-19-belih-eustom\n\n⭐ Вариант 2\n💐 Букет Прояно\n💰 7900 ₽\n🔗 https://florip"
+        },
+        {
+          "input": "Второй",
+          "phase": "N10_delivery",
+          "passed": true,
+          "checks": [
+            "  ✅ phase='N10_delivery' ∈ 'N10_delivery*'"
+          ],
+          "response": "Напишите, пожалуйста, адрес доставки полностью."
+        },
+        {
+          "input": "Москва, Арбат 5",
+          "phase": "N10_delivery",
+          "passed": true,
+          "checks": [
+            "  ✅ phase='N10_delivery' ∈ 'N10_delivery*'",
+            "  ✅ collected['address'] = 'Москва, Арбат 5'"
+          ],
+          "response": "На какую дату нужна доставка?"
+        },
+        {
+          "input": "Завтра",
+          "phase": "N10_delivery",
+          "passed": true,
+          "checks": [
+            "  ✅ phase='N10_delivery' ∈ 'N10_delivery*'",
+            "  ✅ collected['delivery_date'] = 'завтра'"
+          ],
+          "response": "В какое время доставить?\n\nДоставка работает 24/7. Срочная — от 1,5 часов.\nНочная (23:00–09:00) — только заранее оформленные."
+        },
+        {
+          "input": "В 15:00",
+          "phase": "N13_photo",
+          "passed": false,
+          "checks": [
+            "  ❌ phase_prefix: ожидалось 'N10_delivery*', получено 'N13_photo'",
+            "  ❌ collected['delivery_time'] отсутствует. collected=[]"
+          ],
+          "response": "💳 Для оформления заказа необходима предоплата.\n\nСпособы оплаты:\n• 💸 Перевод на карту (Сбер / Тинькофф)\n• 🔗 Ссылка на оплату\n• 💵 Наличные при получении — только для постоянных клиентов\n\n📋 Правила:\n• Но"
+        },
+        {
+          "input": "+7 916 123-45-67",
+          "phase": "N13_photo",
+          "passed": false,
+          "checks": [
+            "  ❌ phase_prefix: ожидалось 'payment*', получено 'N13_photo'",
+            "  ❌ collected['recipient_phone'] отсутствует. collected=[]",
+            "  ❌ response НЕ содержит '#'"
+          ],
+          "response": "💳 Для оформления заказа необходима предоплата.\n\nСпособы оплаты:\n• 💸 Перевод на карту (Сбер / Тинькофф)\n• 🔗 Ссылка на оплату\n• 💵 Наличные при получении — только для постоянных клиентов\n\n📋 Правила:\n• Но"
+        }
+      ]
+    },
+    {
+      "name": "2. Только 'хочу букет' без бюджета → N2_brief",
+      "passed": true,
+      "steps": [
+        {
+          "input": "Хочу букет",
+          "phase": "N2_brief_budget",
+          "passed": true,
+          "checks": [
+            "  ✅ phase='N2_brief_budget' ∈ 'N2_brief*'"
+          ],
+          "response": "На какой бюджет ориентируемся? Минимальный заказ — 5 000 ₽.\n\nКомфортно будет собрать от 5 000–7 000 ₽."
+        },
+        {
+          "input": "7000",
+          "phase": "N9_offer",
+          "passed": true,
+          "checks": [
+            "  ✅ phase='N9_offer' ∈ 'N9_offer*'",
+            "  ✅ collected['budget_max'] = '7000.0'",
+            "  ✅ все цены [0.0, 2390.0, 2900.0] <= 7700"
+          ],
+          "response": "К сожалению, в этом бюджете вариантов нет.\n\nВот самые доступные варианты:\n\n• Любовь — 0 ₽\n  https://floripacco.ru/catalog/tproduct/737482240152-lyubov\n• 5 подсолнухов — 2390 ₽\n  https://floripacco.ru/"
+        }
+      ]
+    },
+    {
+      "name": "3. '10000 рублей' — max_price, цены в пределах бюджета",
+      "passed": true,
+      "steps": [
+        {
+          "input": "Букет до 10000, коллеге",
+          "phase": "N9_offer",
+          "passed": true,
+          "checks": [
+            "  ✅ phase='N9_offer' ∈ 'N9_offer*'",
+            "  ✅ collected['budget_max'] = '11000.0'",
+            "  ✅ response ∌ '99 000'",
+            "  ✅ response ∌ '50 000'",
+            "  ✅ все цены [9900.0, 9900.0, 10900.0] <= 11000"
+          ],
+          "response": "Подобрал для вас варианты:\n\n✅ Вариант 1\n💐 Букет из 31 розы Бомбастик\n💰 9900 ₽\n🔗 https://floripacco.ru/tproduct/266774846262-buket-iz-31-rozi-bombastik\n\n⭐ Вариант 2\n💐 Букет Франеческо\n💰 9900 ₽\n🔗 https:"
+        }
+      ]
+    },
+    {
+      "name": "4. Жалоба из N9_offer → N11_complaint",
+      "passed": true,
+      "steps": [
+        {
+          "input": "Хочу букет до 7000",
+          "phase": "N9_offer",
+          "passed": true,
+          "checks": [
+            "  ✅ phase='N9_offer' ∈ 'N9_offer*'"
+          ],
+          "response": "К сожалению, в этом бюджете вариантов нет.\n\nВот самые доступные варианты:\n\n• Любовь — 0 ₽\n  https://floripacco.ru/catalog/tproduct/737482240152-lyubov\n• 5 подсолнухов — 2390 ₽\n  https://floripacco.ru/"
+        },
+        {
+          "input": "Букет из прошлого заказа завял через день",
+          "phase": "N11_complaint_facts",
+          "passed": true,
+          "checks": [
+            "  ✅ phase='N11_complaint_facts' ∈ 'N11_complaint*'",
+            "  ✅ response ∋ 'извин'"
+          ],
+          "response": "Примите наши извинения.\n\nЧтобы разобраться, напишите, пожалуйста:\n• Когда получили букет\n• Что именно не так (фото приложите)\n• Условия хранения (в вазе/без, температура)\n\nЭто поможет нам понять причи"
+        }
+      ]
+    },
+    {
+      "name": "5. Самовывоз → N7_pickup",
+      "passed": true,
+      "steps": [
+        {
+          "input": "Хочу забрать заказ сам",
+          "phase": "N7_pickup_data",
+          "passed": true,
+          "checks": [
+            "  ✅ phase='N7_pickup_data' ∈ 'N7_pickup*'",
+            "  ✅ response ∋ 'самовывоз'",
+            "  ✅ response ∋ 'предоплат'"
+          ],
+          "response": "🏪 Самовывоз\n\nПравила:\n• Самовывоз только по 100% предоплате\n• После сборки отправим фото\n\nНапишите, что хотите забрать и когда планируете подъехать."
+        }
+      ]
+    },
+    {
+      "name": "6. Срочная доставка → N5_urgent",
+      "passed": true,
+      "steps": [
+        {
+          "input": "Срочно нужен букет через 1.5 часа",
+          "phase": "N5_urgent_data",
+          "passed": true,
+          "checks": [
+            "  ✅ phase='N5_urgent_data' ∈ 'N5_urgent*'",
+            "  ✅ response ∋ 'срочн'"
+          ],
+          "response": "⚡ Для срочного заказа напишите, пожалуйста:\n1️⃣ Адрес доставки\n2️⃣ На какое время нужно\n3️⃣ Бюджет (от 5 000 ₽)\n\nБукет 10–15 тыс. ₽ доставляем за 1,5–2 часа с момента заказа."
+        }
+      ]
+    },
+    {
+      "name": "7. Свадьба/корпоратив → N12_escalation + оператор",
+      "passed": true,
+      "steps": [
+        {
+          "input": "Нам нужно оформление зала на свадьбу для 50 гостей",
+          "phase": "N12_escalated",
+          "passed": true,
+          "checks": [
+            "  ✅ phase='N12_escalated' ∈ 'N12_escalat*'",
+            "  ✅ escalated=True"
+          ],
+          "response": "📞 Сейчас всё уточню и вернусь к вам."
+        }
+      ]
+    },
+    {
+      "name": "8. Юрлицо во время оплаты → реквизиты + оператор",
+      "passed": false,
+      "steps": [
+        {
+          "input": "Букет до 6000 коллеге",
+          "phase": "N9_offer",
+          "passed": true,
+          "checks": [
+            "  ✅ phase='N9_offer' ∈ 'N9_offer*'",
+            "  ✅ все цены [0.0, 2390.0, 2900.0] <= 6600"
+          ],
+          "response": "К сожалению, в этом бюджете вариантов нет.\n\nВот самые доступные варианты:\n\n• Любовь — 0 ₽\n  https://floripacco.ru/catalog/tproduct/737482240152-lyubov\n• 5 подсолнухов — 2390 ₽\n  https://floripacco.ru/"
+        },
+        {
+          "input": "Первый",
+          "phase": "N10_delivery",
+          "passed": true,
+          "checks": [
+            "  ✅ phase='N10_delivery' ∈ 'N10_delivery*'"
+          ],
+          "response": "Напишите, пожалуйста, адрес доставки полностью."
+        },
+        {
+          "input": "Ленинградский проспект 37",
+          "phase": "N10_delivery",
+          "passed": true,
+          "checks": [
+            "  ✅ phase='N10_delivery' ∈ 'N10_delivery*'",
+            "  ✅ collected['address'] = 'Ленинградский проспект 37'"
+          ],
+          "response": "На какую дату нужна доставка?"
+        },
+        {
+          "input": "Завтра в 12:00",
+          "phase": "N13_photo",
+          "passed": true,
+          "checks": [],
+          "response": "💳 Для оформления заказа необходима предоплата.\n\nСпособы оплаты:\n• 💸 Перевод на карту (Сбер / Тинькофф)\n• 🔗 Ссылка на оплату\n• 💵 Наличные при получении — только для постоянных клиентов\n\n📋 Правила:\n• Но"
+        },
+        {
+          "input": "Не знаю телефон",
+          "phase": "N13_photo",
+          "passed": false,
+          "checks": [
+            "  ❌ phase_prefix: ожидалось 'payment*', получено 'N13_photo'"
+          ],
+          "response": "💳 Для оформления заказа необходима предоплата.\n\nСпособы оплаты:\n• 💸 Перевод на карту (Сбер / Тинькофф)\n• 🔗 Ссылка на оплату\n• 💵 Наличные при получении — только для постоянных клиентов\n\n📋 Правила:\n• Но"
+        },
+        {
+          "input": "У нас ООО, нам нужен счёт и договор",
+          "phase": "N12_escalated",
+          "passed": true,
+          "checks": [
+            "  ✅ phase='N12_escalated' ∈ 'N12_escalat*'",
+            "  ✅ response ∋ 'ИНН'",
+            "  ✅ response ∋ 'организац'",
+            "  ✅ escalated=True"
+          ],
+          "response": "🏢 Оплата для юридических лиц:\n\nВыставляем счёт на основании договора.\n\nДля оформления нам понадобятся:\n• Название организации\n• ИНН\n• Юридический адрес\n\nНапишите реквизиты — менеджер подготовит счёт и"
+        }
+      ]
+    },
+    {
+      "name": "9. 'Не знаю телефон' → пропуск, переход к оплате",
+      "passed": false,
+      "steps": [
+        {
+          "input": "Букет до 9000 для девушки",
+          "phase": "N9_offer",
+          "passed": true,
+          "checks": [
+            "  ✅ phase='N9_offer' ∈ 'N9_offer*'"
+          ],
+          "response": "К сожалению, в этом бюджете вариантов нет.\n\nВот самые доступные варианты:\n\n• Любовь — 0 ₽\n  https://floripacco.ru/catalog/tproduct/737482240152-lyubov\n• 5 подсолнухов — 2390 ₽\n  https://floripacco.ru/"
+        },
+        {
+          "input": "Последний",
+          "phase": "N10_delivery",
+          "passed": true,
+          "checks": [
+            "  ✅ phase='N10_delivery' ∈ 'N10_delivery*'"
+          ],
+          "response": "Напишите, пожалуйста, адрес доставки полностью."
+        },
+        {
+          "input": "Тверская 1",
+          "phase": "N10_delivery",
+          "passed": true,
+          "checks": [
+            "  ✅ phase='N10_delivery' ∈ 'N10_delivery*'",
+            "  ✅ collected['address'] = 'Тверская 1'"
+          ],
+          "response": "На какую дату нужна доставка?"
+        },
+        {
+          "input": "Завтра в 19:00",
+          "phase": "N13_photo",
+          "passed": false,
+          "checks": [
+            "  ❌ phase_prefix: ожидалось 'N10_delivery*', получено 'N13_photo'"
+          ],
+          "response": "💳 Для оформления заказа необходима предоплата.\n\nСпособы оплаты:\n• 💸 Перевод на карту (Сбер / Тинькофф)\n• 🔗 Ссылка на оплату\n• 💵 Наличные при получении — только для постоянных клиентов\n\n📋 Правила:\n• Но"
+        },
+        {
+          "input": "Не знаю телефон",
+          "phase": "N13_photo",
+          "passed": false,
+          "checks": [
+            "  ❌ phase_prefix: ожидалось 'payment*', получено 'N13_photo'"
+          ],
+          "response": "💳 Для оформления заказа необходима предоплата.\n\nСпособы оплаты:\n• 💸 Перевод на карту (Сбер / Тинькофф)\n• 🔗 Ссылка на оплату\n• 💵 Наличные при получении — только для постоянных клиентов\n\n📋 Правила:\n• Но"
+        }
+      ]
+    },
+    {
+      "name": "10. Бюджет < 5000 → предупреждение о минимуме",
+      "passed": false,
+      "steps": [
+        {
+          "input": "Нужен букет за 2000 рублей",
+          "phase": "N9_offer",
+          "passed": false,
+          "checks": [
+            "  ❌ response НЕ содержит '5 000'",
+            "  ❌ response НЕ содержит '5000'"
+          ],
+          "response": "К сожалению, в этом бюджете вариантов нет.\n\nВот самые доступные варианты:\n\n• Любовь — 0 ₽\n  https://floripacco.ru/catalog/tproduct/737482240152-lyubov\n• 5 подсолнухов — 2390 ₽\n  https://floripacco.ru/"
+        }
+      ]
+    },
+    {
+      "name": "11. Размытые ответы ('не знаю') — бот двигается дальше",
+      "passed": true,
+      "steps": [
+        {
+          "input": "Нужен букет, не знаю какой",
+          "phase": "N2_brief_occasion",
+          "passed": true,
+          "checks": [
+            "  ✅ phase='N2_brief_occasion' ∈ 'N2_brief*'"
+          ],
+          "response": "Понял! Подберу на наш вкус.\nКому и по какому поводу выбираем?"
+        },
+        {
+          "input": "Около 10000",
+          "phase": "N9_offer",
+          "passed": true,
+          "checks": [
+            "  ✅ phase='N9_offer' ∈ 'N9_offer*'",
+            "  ✅ collected['budget_max'] = '10000.0'",
+            "  ✅ все цены [0.0, 2390.0, 2900.0] <= 11000"
+          ],
+          "response": "К сожалению, в этом бюджете вариантов нет.\n\nВот самые доступные варианты:\n\n• Любовь — 0 ₽\n  https://floripacco.ru/catalog/tproduct/737482240152-lyubov\n• 5 подсолнухов — 2390 ₽\n  https://floripacco.ru/"
+        }
+      ]
+    },
+    {
+      "name": "12. Каталог 'покажи' + диапазон '5000-10000'",
+      "passed": true,
+      "steps": [
+        {
+          "input": "Покажи что есть в каталоге",
+          "phase": "N3_catalog_choice",
+          "passed": true,
+          "checks": [
+            "  ✅ phase='N3_catalog_choice' ∈ 'N3_catalog*'",
+            "  ✅ response ∋ 'категори'",
+            "  ✅ response ∋ '₽'"
+          ],
+          "response": "📋 Категории букетов:\n\n• До 5 000 ₽ — 3 варианта\n• 5 000–10 000 ₽ — 18 вариантов\n• 10 000–15 000 ₽ — 9 вариантов\n• 15 000–20 000 ₽ — 16 вариантов\n• Свыше 20 000 ₽ — 22 варианта\n\nНапишите бюджет — покаж"
+        },
+        {
+          "input": "5000-10000",
+          "phase": "N3_catalog_choice",
+          "passed": true,
+          "checks": [
+            "  ✅ phase='N3_catalog_choice' ∈ 'N3_catalog*'"
+          ],
+          "response": "Вот подходящие варианты (18 шт.):\n\n• Букет Модена — 5900 ₽\n  https://floripacco.ru/tproduct/362475045332-buket-modena\n• Букет Альто — 5990 ₽\n  https://floripacco.ru/catalog/tproduct/582890758422-buket"
+        }
+      ]
+    },
+    {
+      "name": "13. Вопрос о доставке → N8_faq",
+      "passed": false,
+      "steps": [
+        {
+          "input": "Сколько стоит доставка за МКАД?",
+          "phase": "N2_brief_budget",
+          "passed": false,
+          "checks": [
+            "  ❌ phase_prefix: ожидалось 'N8_faq*', получено 'N2_brief_budget'",
+            "  ✅ response ∋ 'МКАД'",
+            "  ✅ response ∋ '₽'"
+          ],
+          "response": "🚚 Доставка:\n• МКАД — от 600 ₽ (бесплатно при заказе от 20 000 ₽)\n• За МКАД — 1 000 ₽ + 50 ₽/км\n• Срочная — от 1,5 часов\n• Ночная (23:00–09:00) — заранее оформленные заказы\n\nХотите оформить заказ? Напи"
+        }
+      ]
+    },
+    {
+      "name": "14. Выбор по имени букета в N9_offer",
+      "passed": false,
+      "steps": [
+        {
+          "input": "Хочу букет до 8000 маме",
+          "phase": "N9_offer",
+          "passed": true,
+          "checks": [
+            "  ✅ phase='N9_offer' ∈ 'N9_offer*'",
+            "  ✅ все цены [0.0, 2390.0, 2900.0] <= 8800"
+          ],
+          "response": "К сожалению, в этом бюджете вариантов нет.\n\nВот самые доступные варианты:\n\n• Любовь — 0 ₽\n  https://floripacco.ru/catalog/tproduct/737482240152-lyubov\n• 5 подсолнухов — 2390 ₽\n  https://floripacco.ru/"
+        },
+        {
+          "input": "Букет Модена",
+          "phase": "N10_delivery",
+          "passed": false,
+          "checks": [
+            "  ✅ phase='N10_delivery' ∈ 'N10_delivery*'",
+            "  ❌ collected['bouquet_name'] отсутствует. collected=['budget_min', 'budget_max', 'recipient', 'recipient_phone']",
+            "  ❌ response НЕ содержит 'Модена'"
+          ],
+          "response": "Напишите, пожалуйста, адрес доставки полностью."
+        }
+      ]
+    },
+    {
+      "name": "15. Адрес + дата + время + телефон одним сообщением",
+      "passed": false,
+      "steps": [
+        {
+          "input": "Хочу букет 7000 девушке",
+          "phase": "N9_offer",
+          "passed": true,
+          "checks": [
+            "  ✅ phase='N9_offer' ∈ 'N9_offer*'"
+          ],
+          "response": "К сожалению, в этом бюджете вариантов нет.\n\nВот самые доступные варианты:\n\n• Любовь — 0 ₽\n  https://floripacco.ru/catalog/tproduct/737482240152-lyubov\n• 5 подсолнухов — 2390 ₽\n  https://floripacco.ru/"
+        },
+        {
+          "input": "Третий",
+          "phase": "N10_delivery",
+          "passed": true,
+          "checks": [
+            "  ✅ phase='N10_delivery' ∈ 'N10_delivery*'"
+          ],
+          "response": "Напишите, пожалуйста, адрес доставки полностью."
+        },
+        {
+          "input": "Доставьте завтра в 14:00 на ул. Ленина 10, телефон +7 916 000-00-00",
+          "phase": "N13_photo",
+          "passed": false,
+          "checks": [
+            "  ❌ phase_prefix: ожидалось 'payment*', получено 'N13_photo'",
+            "  ❌ collected['address'] отсутствует. collected=[]",
+            "  ❌ collected['delivery_date'] отсутствует. collected=[]",
+            "  ❌ collected['delivery_time'] отсутствует. collected=[]",
+            "  ❌ collected['recipient_phone'] отсутствует. collected=[]"
+          ],
+          "response": "💳 Для оформления заказа необходима предоплата.\n\nСпособы оплаты:\n• 💸 Перевод на карту (Сбер / Тинькофф)\n• 🔗 Ссылка на оплату\n• 💵 Наличные при получении — только для постоянных клиентов\n\n📋 Правила:\n• Но"
+        }
+      ]
+    },
+    {
+      "name": "16. Только приветствие → greeting, затем бриф",
+      "passed": true,
+      "steps": [
+        {
+          "input": "Привет",
+          "phase": "N0_greet",
+          "passed": true,
+          "checks": [
+            "  ✅ phase == 'N0_greet'",
+            "  ✅ response ∋ 'Добрый день'"
+          ],
+          "response": "Добрый день! Рады приветствовать в Flori Pacco.\n\nПомогу подобрать идеальный букет — напишите ваши пожелания.\nНапример: повод, кому, бюджет, любимые цветы."
+        },
+        {
+          "input": "Мне нужны розы",
+          "phase": "N2_brief_budget",
+          "passed": true,
+          "checks": [
+            "  ✅ phase='N2_brief_budget' ∈ 'N2_brief*'"
+          ],
+          "response": "На какой бюджет ориентируемся? Минимальный заказ — 5 000 ₽.\n\nКомфортно будет собрать от 5 000–7 000 ₽."
+        },
+        {
+          "input": "8000",
+          "phase": "N9_offer",
+          "passed": true,
+          "checks": [
+            "  ✅ phase='N9_offer' ∈ 'N9_offer*'",
+            "  ✅ все цены [0.0, 2390.0, 2900.0] <= 8800"
+          ],
+          "response": "К сожалению, в этом бюджете вариантов нет.\n\nВот самые доступные варианты:\n\n• Любовь — 0 ₽\n  https://floripacco.ru/catalog/tproduct/737482240152-lyubov\n• 5 подсолнухов — 2390 ₽\n  https://floripacco.ru/"
+        }
+      ]
+    }
+  ]
+}

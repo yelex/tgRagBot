@@ -419,6 +419,9 @@ class FlowerLogic:
 • N10_delivery — сбор данных доставки. Переходи когда клиент выбрал букет по имени или номеру
 • N11_complaint — жалоба на качество предыдущего заказа
 • N12_escalation — нужен оператор: корпоратив, конфликт, >30 000 ₽, отмена после сборки
+• N10_delivery — сбор данных доставки. ОСТАВАЙСЯ здесь пока не собраны все три:
+  адрес, дата доставки, время доставки (телефон опционален).
+  Переходи в payment ТОЛЬКО когда адрес+дата+время все присутствуют в истории.
 • payment — оплата. Переходи из N10_delivery когда адрес+дата+время собраны.
   ВАЖНО: фаза N13_photo_approval — это ожидание подтверждения оплаты/фото.
   Если клиент уточняет способ оплаты ("юрлицо", "реквизиты", "по счёту",
@@ -427,9 +430,10 @@ class FlowerLogic:
 ПРИОРИТЕТЫ (всегда, независимо от текущей фазы):
 1. Жалоба на качество → N11_complaint
 2. "Позвать менеджера/оператора/владельца" → N12_escalation
-3. "Срочно / через час" → N5_urgent
-4. Самовывоз → N7_pickup
-5. Вопрос о правилах → N8_faq
+3. Свадьба / корпоратив / оформление мероприятия / заказ от компании / оформление зала → N12_escalation
+4. "Срочно / через час" → N5_urgent
+5. Самовывоз → N7_pickup
+6. Вопрос о правилах → N8_faq
 
 ИСТОРИЯ (последние сообщения):
 {history}
@@ -483,29 +487,34 @@ class FlowerLogic:
             user_input=state["user_input"],
         )
 
-        try:
-            start = time.time()
-            if self.routing_llm is not None:
-                result = self.routing_llm.invoke(prompt)
-            else:
-                # JSON fallback через intent_llm
-                raw = self.intent_llm.invoke(
-                    prompt + '\n\nОтвет строго в JSON: {"next_phase": "...", "max_price": null, ...}'
-                )
-                content = getattr(raw, "content", "") or ""
-                data = self._extract_first_json(str(content))
-                result = NLUDecision(**data) if data.get("next_phase") else None
+        for attempt in range(3):
+            try:
+                start = time.time()
+                if self.routing_llm is not None:
+                    result = self.routing_llm.invoke(prompt)
+                else:
+                    raw = self.intent_llm.invoke(
+                        prompt + '\n\nОтвет строго в JSON: {"next_phase": "...", "max_price": null, ...}'
+                    )
+                    content = getattr(raw, "content", "") or ""
+                    data = self._extract_first_json(str(content))
+                    result = NLUDecision(**data) if data.get("next_phase") else None
 
-            logger.info("Routing LLM took %.2fs uid=%s", time.time() - start, state.get("user_id"))
-            time.sleep(0.5)
+                logger.info("Routing LLM took %.2fs attempt=%d uid=%s",
+                            time.time() - start, attempt + 1, state.get("user_id"))
+                time.sleep(1.0)
 
-            if isinstance(result, NLUDecision):
-                self.nlu_cache[cache_key] = result.model_dump()
-                logger.info("Routing: %s → %s uid=%s",
-                            current_phase, result.next_phase, state.get("user_id"))
+                if isinstance(result, NLUDecision):
+                    self.nlu_cache[cache_key] = result.model_dump()
+                    logger.info("Routing: %s → %s uid=%s",
+                                current_phase, result.next_phase, state.get("user_id"))
                 return result
-        except Exception as exc:
-            logger.warning("Routing LLM failed: %s", exc)
+            except Exception as exc:
+                wait = 2 ** attempt
+                logger.warning("Routing LLM attempt %d failed (%s), retry in %ds",
+                               attempt + 1, exc, wait)
+                if attempt < 2:
+                    time.sleep(wait)
 
         return None
 
@@ -829,6 +838,23 @@ class FlowerLogic:
             collected["product_type"] = entities["product_type"]
         if entities.get("gamma"):
             collected["gamma"] = entities["gamma"]
+
+        # Б3: fallback-парсинг диапазона "5000-10000" или "до 10000" из текста
+        if not collected.get("budget_max") and not collected.get("budget_min"):
+            raw = state["user_input"]
+            rng = re.search(r'(\d[\d\s]*)\s*[-–]\s*(\d[\d\s]*)', raw)
+            if rng:
+                try:
+                    collected["budget_min"] = float(rng.group(1).replace(" ", ""))
+                    collected["budget_max"] = float(rng.group(2).replace(" ", ""))
+                except ValueError:
+                    pass
+            else:
+                price_fb = self._extract_price_from_text(raw)
+                if price_fb.get("max_price"):
+                    collected["budget_max"] = price_fb["max_price"]
+                if price_fb.get("min_price"):
+                    collected["budget_min"] = price_fb["min_price"]
 
         # Если клиент выбрал букет по имени или позиции → переходим к доставке
         if state.get("phase") == "N3_catalog_choice" and user_id is not None:
@@ -1251,6 +1277,20 @@ class FlowerLogic:
         bouquets = state["bouquets_data"]
         user_id = state.get("user_id")
 
+        # Б1: персистируем бюджет из entities если ещё не в collected
+        if entities.get("max_price") and not collected.get("budget_max"):
+            bmin, bmax = self._normalize_budget_range(entities.get("min_price"), entities["max_price"])
+            collected["budget_min"] = bmin
+            collected["budget_max"] = bmax
+        elif entities.get("min_price") and not collected.get("budget_min"):
+            bmin, bmax = self._normalize_budget_range(entities["min_price"], None)
+            collected["budget_min"] = bmin
+            collected["budget_max"] = bmax
+        # Персистируем прочие поля брифа
+        for key in ("occasion", "recipient", "product_type", "gamma"):
+            if entities.get(key) and not collected.get(key):
+                collected[key] = entities[key]
+
         # Если клиент выбрал букет по имени или позиции — переходим к доставке
         text_lower = state["user_input"].lower()
         name_query = entities.get("name_query", "")
@@ -1449,6 +1489,17 @@ class FlowerLogic:
         entities = state.get("entities", {})
         text = state["user_input"]
         text_lower = text.lower()
+
+        # Б2: если букет ещё не выбран, пробуем найти по name_query или позиции
+        if not collected.get("bouquet_name"):
+            name_q = (entities.get("name_query") or "").lower()
+            if name_q:
+                last = self._last_bouquets.get(user_id if (user_id := state.get("user_id")) else -1, [])
+                candidates = last or state["bouquets_data"]
+                match = next((b for b in candidates if name_q in b["Название"].lower()), None)
+                if match:
+                    collected["bouquet_name"] = match["Название"]
+                    collected["bouquet_price"] = match["Цена"]
 
         # ── Извлекаем все поля из entities и текста ──────────────────────────
         if entities.get("address"):
