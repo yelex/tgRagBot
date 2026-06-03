@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 
 load_dotenv()
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
+OPERATOR_CHAT_ID = os.getenv('OPERATOR_CHAT_ID')
 
 
 class TelegramBot:
@@ -181,19 +182,88 @@ class TelegramBot:
 
     @staticmethod
     def _clean_response(text: str):
-        """Очищает ответ от служебных мета-маркеров. Возвращает (cleaned_text, keyboard_or_None)."""
+        """Очищает ответ от служебных мета-маркеров. Возвращает (cleaned_text, keyboard_or_None, escalation_or_None)."""
         keyboard = None
+        escalation = None
+
         kb_match = re.search(r'\|\|keyboard:(\[.*?\])\|\|', text)
         if kb_match:
             try:
                 keyboard = json.loads(kb_match.group(1))
             except (json.JSONDecodeError, ValueError):
                 pass
+
+        esc_match = re.search(r'\|\|escalate:(\{.*?\})\|\|', text)
+        if esc_match:
+            try:
+                escalation = json.loads(esc_match.group(1))
+            except (json.JSONDecodeError, ValueError):
+                pass
+
         cleaned = re.sub(r'\|\|phase:[a-zA-Z0-9_]+\|\|', '', text)
         cleaned = re.sub(r'\|\|data:\{.*?\}\|\|', '', cleaned)
         cleaned = re.sub(r'\|\|more:\d+:\d+\|\|', '', cleaned)
         cleaned = re.sub(r'\|\|keyboard:\[.*?\]\|\|', '', cleaned)
-        return cleaned.strip(), keyboard
+        cleaned = re.sub(r'\|\|escalate:\{.*?\}\|\|', '', cleaned)
+        return cleaned.strip(), keyboard, escalation
+
+    async def _notify_operator(
+        self,
+        context,
+        user_id: int,
+        user_name: str,
+        escalation: dict,
+        history: List[Dict[str, str]],
+    ):
+        if not OPERATOR_CHAT_ID:
+            logger.warning("OPERATOR_CHAT_ID не задан, уведомление оператору пропущено")
+            return
+
+        reason_labels = {
+            "complaint": "Жалоба клиента",
+            "photo_dispute": "Спор по фото",
+            "delivery_conflict": "Конфликт доставки",
+            "other": "Нестандартная ситуация",
+        }
+        reason = reason_labels.get(escalation.get("reason", "other"), escalation.get("reason", "—"))
+
+        order_line = ""
+        if escalation.get("order_id"):
+            parts = [f"#{escalation['order_id']}"]
+            if escalation.get("bouquet_name"):
+                parts.append(escalation["bouquet_name"])
+            if escalation.get("budget_max"):
+                parts.append(f"до {int(escalation['budget_max'])} ₽")
+            order_line = f"\n💐 Заказ: {' — '.join(parts)}"
+
+        address_line = ""
+        if escalation.get("address"):
+            address_line = f"\n📍 Адрес: {escalation['address']}"
+
+        last_msgs = []
+        for msg in history[-5:]:
+            role_label = "Клиент" if msg.get("role") == "user" else "Бот"
+            content = re.sub(r'\|\|.*?\|\|', '', msg.get("content", "")).strip()
+            if content:
+                last_msgs.append(f"{role_label}: {content[:120]}")
+        history_block = "\n".join(last_msgs) if last_msgs else "—"
+
+        text = (
+            f"🚨 Нужна помощь оператора\n\n"
+            f"👤 Клиент: @{user_name} (ID: {user_id}){order_line}{address_line}\n"
+            f"📋 Причина: {reason}\n\n"
+            f"Последние сообщения:\n{history_block}\n\n"
+            f"🔗 Написать клиенту: tg://user?id={user_id}"
+        )
+
+        try:
+            await context.bot.send_message(
+                chat_id=OPERATOR_CHAT_ID,
+                text=text,
+            )
+            logger.info("Уведомление оператору отправлено: user_id=%s reason=%s", user_id, escalation.get("reason"))
+        except Exception as e:
+            logger.error("Не удалось отправить уведомление оператору: %s", e)
 
     @staticmethod
     def _sanitize_for_markdown(text: str) -> str:
@@ -237,8 +307,8 @@ class TelegramBot:
         
         Важно: перед отправкой очищаем мета-маркеры.
         """
-        # Очищаем от служебных маркеров (теперь функция возвращает кортеж)
-        clean_text, kb_list = self._clean_response(text)
+        # Очищаем от служебных маркеров
+        clean_text, kb_list, _ = self._clean_response(text)
         # Если reply_markup ещё не передан, а kb_list есть — создаём ReplyKeyboardMarkup
         if reply_markup is None and kb_list:
             reply_markup = ReplyKeyboardMarkup(
@@ -323,6 +393,21 @@ class TelegramBot:
             )
 
             self._add_to_history(user_id, "assistant", response)
+
+            # Проверяем маркер эскалации — уведомляем оператора до отправки клиенту
+            esc_match = re.search(r'\|\|escalate:(\{.*?\})\|\|', response)
+            if esc_match:
+                try:
+                    escalation = json.loads(esc_match.group(1))
+                    await self._notify_operator(
+                        context=context,
+                        user_id=user_id,
+                        user_name=user_name,
+                        escalation=escalation,
+                        history=self._get_conversation_history(user_id),
+                    )
+                except Exception as e:
+                    logger.error("Ошибка при обработке эскалации: %s", e)
 
             # Проверяем, есть ли маркер "показать ещё"
             more_match = re.search(r'\|\|more:(\d+):(\d+)\|\|', response)

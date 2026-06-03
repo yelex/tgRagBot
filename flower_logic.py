@@ -1610,11 +1610,20 @@ class FlowerLogic:
         collected = state.get("collected_data", {})
         reason = collected.get("escalation_reason", "other")
 
+        escalation_payload = {
+            "reason": reason,
+            "order_id": collected.get("order_id"),
+            "bouquet_name": collected.get("bouquet_name"),
+            "budget_max": collected.get("budget_max"),
+            "address": collected.get("address"),
+        }
+
         state["phase"] = "N12_escalated"
-        state["response"] = (
-            "📞 Сейчас всё уточню и вернусь к вам."
+        state["response"] = "📞 Сейчас всё уточню и вернусь к вам."
+        state["response"] += (
+            f" ||phase:N12_escalated||"
+            f" ||escalate:{json.dumps(escalation_payload, ensure_ascii=False)}||"
         )
-        state["response"] += " ||phase:N12_escalated||"
         logger.info("N12_escalation: reason=%s %s", reason, self._user_context(state))
         return state
 
