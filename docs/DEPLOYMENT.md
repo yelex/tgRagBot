@@ -47,21 +47,21 @@ nano .env
 Минимальный `.env`:
 
 ```env
-TELEGRAM_TOKEN=7905921782:AAFsv_f6udnZ9lz7ufWlbe8Ev_JThBSu6to
+TELEGRAM_TOKEN=your_telegram_bot_token_here
 
-GIGACHAT_CREDENTIALS=MGY5ZDg4YzAtYzRhNS00ZGYyLTk5Y2ItZjQ0ZTFjYTBjZGY5OmY1Nzg4MmMzLWVjMGEtNDgzYi1hMDllLTM5MzZhZjE5OTc2Ng==
+GIGACHAT_CREDENTIALS=your_gigachat_credentials_base64_here
 GIGACHAT_SCOPE=GIGACHAT_API_CORP
 GIGACHAT_MODEL=GigaChat-2-Max
 GIGACHAT_TIMEOUT=60
 
-OPERATOR_CHAT_ID=7180426531
+OPERATOR_CHAT_ID=your_operator_chat_id_here
 FEEDBACK_DELAY_HOURS=2
 
-MYSQL_HOST=95.142.42.28
+MYSQL_HOST=your_mysql_host
 MYSQL_PORT=3306
-MYSQL_USER=yelex
-MYSQL_PASSWORD=Fokina12
-MYSQL_DATABASE=floridb
+MYSQL_USER=your_mysql_user
+MYSQL_PASSWORD=your_mysql_password
+MYSQL_DATABASE=your_database_name
 
 PATH_BOUQUETS=/app/data/bouquets.json
 PATH_SYSTEM_PROMPT=/app/prompts/system_prompt.txt
