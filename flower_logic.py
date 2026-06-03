@@ -495,8 +495,7 @@ class FlowerLogic:
             if not isinstance(content, str):
                 content = str(content)
 
-            match = re.search(r"\{.*\}", content, flags=re.DOTALL)
-            payload = json.loads(match.group(0) if match else content)
+            payload = self._extract_first_json(content)
             intent = self._normalize_intent(str(payload.get("intent", "")))
             entities_raw = payload.get("entities", {}) if isinstance(payload, dict) else {}
             if not isinstance(entities_raw, dict):
@@ -1304,29 +1303,56 @@ class FlowerLogic:
         bouquets = state["bouquets_data"]
         user_id = state.get("user_id")
 
-        # Если клиент выбрал букет по имени — сохраняем и переходим к доставке
+        # Если клиент выбрал букет по имени или позиции — переходим к доставке
+        text_lower = state["user_input"].lower()
         name_query = entities.get("name_query", "")
-        if name_query and state.get("phase") == "N9_offer":
-            match = next(
+
+        # Позиционный выбор: "первый/1", "второй/2", "третий/3/последний"
+        positional_match = None
+        if state.get("phase") == "N9_offer" and user_id is not None:
+            last = self._last_bouquets.get(user_id, [])
+            if last:
+                pos_map = {
+                    0: ("первый", "1 вариант", "вариант 1", "первый вариант"),
+                    1: ("второй", "2 вариант", "вариант 2", "второй вариант"),
+                    2: ("третий", "3 вариант", "вариант 3", "третий вариант",
+                        "последний", "последний вариант"),
+                }
+                for idx, keywords in pos_map.items():
+                    if any(kw in text_lower for kw in keywords) and idx < len(last):
+                        positional_match = last[idx]
+                        break
+                # Просто "3" или "2" или "1" в сообщении
+                if not positional_match:
+                    for idx in range(min(3, len(last))):
+                        if str(idx + 1) in text_lower.split():
+                            positional_match = last[idx]
+                            break
+
+        chosen = positional_match
+        if not chosen and name_query and state.get("phase") == "N9_offer":
+            chosen = next(
                 (b for b in bouquets if name_query.lower() in b["Название"].lower()),
                 None,
             )
-            if match:
-                collected["bouquet_name"] = match["Название"]
-                collected["bouquet_price"] = match["Цена"]
-                state["collected_data"] = collected
-                state["phase"] = "N10_delivery"
-                state["response"] = (
-                    f"Отлично, {match['Название']} — хороший выбор!\n\n"
-                    "Теперь нужны данные для доставки.\n"
-                    "Напишите адрес доставки."
-                )
-                state["response"] += f" ||phase:N10_delivery|| ||data:{json.dumps(collected, ensure_ascii=False)}||"
-                logger.info(
-                    "N9_offer: bouquet chosen '%s' → N10_delivery %s",
-                    match["Название"], self._user_context(state),
-                )
-                return state
+
+        if chosen and state.get("phase") == "N9_offer":
+            match = chosen
+            collected["bouquet_name"] = match["Название"]
+            collected["bouquet_price"] = match["Цена"]
+            state["collected_data"] = collected
+            state["phase"] = "N10_delivery"
+            state["response"] = (
+                f"Отлично, {match['Название']} — хороший выбор!\n\n"
+                "Теперь нужны данные для доставки.\n"
+                "Напишите адрес доставки."
+            )
+            state["response"] += f" ||phase:N10_delivery|| ||data:{json.dumps(collected, ensure_ascii=False)}||"
+            logger.info(
+                "N9_offer: bouquet chosen '%s' → N10_delivery %s",
+                match["Название"], self._user_context(state),
+            )
+            return state
 
         max_price = collected.get("budget_max") or entities.get("max_price")
         min_price = collected.get("budget_min") or entities.get("min_price")
@@ -1885,6 +1911,25 @@ class FlowerLogic:
         if keyboard:
             state["response"] += f" ||keyboard:{json.dumps(keyboard, ensure_ascii=False)}||"
         return state
+
+    @staticmethod
+    def _extract_first_json(text: str) -> dict:
+        """Извлекает первый полный JSON-объект из текста, игнорируя всё после него."""
+        start = text.find("{")
+        if start == -1:
+            return {}
+        depth = 0
+        for i, ch in enumerate(text[start:], start):
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return json.loads(text[start : i + 1])
+                    except (json.JSONDecodeError, ValueError):
+                        return {}
+        return {}
 
     @staticmethod
     def _extract_phone_from_text(text: str) -> Optional[str]:

@@ -20,11 +20,13 @@ from telegram.ext import (
 from flower_logic import FlowerLogic, create_price_ranges, format_bouquet_message, get_bouquet_image
 
 # Настройка логгера
+_log_dir = os.getenv("LOG_DIR", os.path.join(os.path.dirname(__file__), "logs"))
+os.makedirs(_log_dir, exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler("/app/logs/flower_bot.log"),
+        logging.FileHandler(os.path.join(_log_dir, "flower_bot.log")),
         logging.StreamHandler()
     ]
 )
