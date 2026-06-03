@@ -5,6 +5,8 @@ import re
 import time
 from typing import Any, Dict, List, Literal, Optional, TypedDict
 
+from pydantic import BaseModel, Field
+
 from dotenv import load_dotenv
 from langchain_gigachat.chat_models import GigaChat
 from langgraph.graph import END, START, StateGraph
@@ -22,6 +24,31 @@ DELIVERY_BEYOND_PER_KM = 50         # + 50 ₽/км от МКАД
 FREE_DELIVERY_THRESHOLD = 20000     # Бесплатная доставка от этой суммы (МКАД)
 COURIER_WAIT_FREE_MIN = 15          # Бесплатное ожидание курьера (мин)
 COURIER_WAIT_PRICE_PER_10MIN = 100  # Цена за каждые 10 мин сверх лимита
+
+
+_ROUTABLE_PHASES = Literal[
+    "N0_greet", "N2_brief", "N3_catalog", "N4_reference",
+    "N5_urgent", "N6_scheduled", "N7_pickup", "N8_faq",
+    "N9_offer", "N10_delivery", "N11_complaint", "N12_escalation",
+    "payment", "unknown",
+]
+
+
+class NLUDecision(BaseModel):
+    """Решение роутера: следующая фаза + все сущности из сообщения."""
+    next_phase: _ROUTABLE_PHASES = Field(description="Следующая фаза диалога")
+    max_price: Optional[float] = Field(None, description="Максимальный бюджет (руб)")
+    min_price: Optional[float] = Field(None, description="Минимальный бюджет (руб)")
+    name_query: Optional[str] = Field(None, description="Название выбранного букета")
+    occasion: Optional[str] = Field(None, description="Повод (день рождения, юбилей...)")
+    recipient: Optional[str] = Field(None, description="Получатель (маме, девушке...)")
+    product_type: Optional[str] = Field(None, description="Тип (букет, коробка, корзина...)")
+    gamma: Optional[str] = Field(None, description="Цветовая гамма")
+    address: Optional[str] = Field(None, description="Адрес доставки")
+    delivery_date: Optional[str] = Field(None, description="Дата доставки")
+    delivery_time: Optional[str] = Field(None, description="Время доставки")
+    recipient_phone: Optional[str] = Field(None, description="Телефон получателя")
+    card_text: Optional[str] = Field(None, description="Текст открытки")
 
 
 class AgentState(TypedDict):
@@ -67,7 +94,8 @@ class FlowerLogic:
         self.bouquets_info: str = ""
         self.bouquets_data: List[Dict[str, Any]] = []
         self.intent_llm: Optional[GigaChat] = None
-        self.vision_llm = None  # GigaChat vision через file API — не реализован
+        self.routing_llm = None  # GigaChat.with_structured_output(NLUDecision)
+        self.vision_llm = None
         self.graph = None
         self._last_bouquets: Dict[int, List[Dict[str, Any]]] = {}
         self.nlu_cache: Dict[str, Dict[str, Any]] = {}
@@ -110,6 +138,12 @@ class FlowerLogic:
                 max_tokens=512,
             )
             logger.info("GigaChat LLM инициализирован: %s", self.GIGACHAT_MODEL)
+            try:
+                self.routing_llm = self.intent_llm.with_structured_output(NLUDecision)
+                logger.info("Routing LLM (structured output) инициализирован")
+            except Exception as exc:
+                logger.warning("with_structured_output недоступен, fallback на JSON: %s", exc)
+                self.routing_llm = None
         except Exception as exc:
             logger.exception("Не удалось инициализировать GigaChat LLM: %s", exc)
             self.intent_llm = None
@@ -256,56 +290,45 @@ class FlowerLogic:
     def _nlu_node(self, state: AgentState) -> AgentState:
         logger.info("Agent node enter: nlu %s", self._user_context(state))
 
-        # Восстанавливаем фазу и собранные данные из истории
+        # Восстанавливаем фазу и данные из истории
         phase = self._extract_phase_from_history(state)
         state["phase"] = self._normalize_phase(phase)
         state["collected_data"] = self._extract_collected_data_from_history(state)
 
-        # Если есть фаза — значит диалог уже идёт, NLU только для извлечения сущностей
-        if state["phase"] != "init":
-            # Для уже идущего диалога определяем интент/сущности через LLM или fallback
-            nlu_result = self._predict_nlu_with_llm(state)
-            intent = self._normalize_intent(str(nlu_result.get("intent", "unknown")))
-            entities: Dict[str, Any] = nlu_result.get("entities", {})
-            if not isinstance(entities, dict):
-                entities = {}
-            if intent == "unknown":
-                intent = self._fallback_intent_from_rules(state)
-            state["intent"] = intent
+        # Пробуем structured routing
+        decision = self._predict_routing_decision(state)
+
+        if decision is not None:
+            entities: Dict[str, Any] = {
+                k: v for k, v in decision.model_dump().items()
+                if k != "next_phase" and v is not None
+            }
+            # Price regex fallback поверх LLM (на случай неточности)
+            for key, val in self._extract_price_from_text(state["user_input"]).items():
+                if val is not None and key not in entities:
+                    entities[key] = val
+
             state["entities"] = entities
+            state["intent"] = "unknown"
+
+            predicted = decision.next_phase
+            if predicted != "unknown":
+                current_node = self._phase_to_node_name(state["phase"])
+                predicted_node = self._phase_to_node_name(predicted)
+                # Если LLM предлагает тот же узел — сохраняем под-фазу (N2_brief_gamma и т.п.)
+                if predicted_node != current_node:
+                    state["phase"] = predicted
             logger.info(
-                "NLU (phase=%s): intent=%s entities=%s %s",
-                state["phase"], intent, entities, self._user_context(state),
+                "NLU structured: next=%s entities=%s %s",
+                decision.next_phase, list(entities.keys()), self._user_context(state),
             )
             return state
 
-        # Первый вход: определяем интент и фазу
-        nlu_result = self._predict_nlu_with_llm(state)
-        intent = self._normalize_intent(str(nlu_result.get("intent", "unknown")))
-        entities = nlu_result.get("entities", {})
-        if not isinstance(entities, dict):
-            entities = {}
-
-        if intent == "unknown":
-            intent = self._fallback_intent_from_rules(state)
-
-        # Fallback-извлечение цен
-        price_fallback = self._extract_price_from_text(state["user_input"])
-        for key, val in price_fallback.items():
-            if val is not None and key not in entities:
-                entities[key] = val
-
-        if "query_text" not in entities:
-            entities["query_text"] = state["user_input"].lower()
-
-        state["intent"] = intent
-        state["entities"] = entities
-        state["phase"] = "init"
-
-        logger.info(
-            "NLU (init): intent=%s entities=%s %s",
-            intent, entities, self._user_context(state),
-        )
+        # Fallback: keyword routing
+        logger.warning("Routing LLM недоступен, keyword fallback %s", self._user_context(state))
+        state["intent"] = self._keyword_routing_fallback(state)
+        price_fb = self._extract_price_from_text(state["user_input"])
+        state["entities"] = {k: v for k, v in price_fb.items() if v is not None}
         return state
 
     # sub_phases → node_name mapping
@@ -340,266 +363,151 @@ class FlowerLogic:
         return "router"
 
     def _route_after_nlu(self, state: AgentState) -> str:
-        """Маршрутизация после NLU: учитывает фазу и интент."""
+        """Маршрутизация после NLU: фаза уже выставлена в _nlu_node."""
         phase = state.get("phase", "init")
-        intent = state.get("intent", "unknown")
-
-        # Интенты, которые могут прервать текущую фазу
-        # (НЕ срабатывают внутри брифа/каталога/приветствия — там диалог идёт своим чередом)
-        non_override_phases = {
-            "init", "N0_greet", "N2_brief_budget", "N2_brief_occasion",
-            "N2_brief_format", "N2_brief_gamma", "N2_brief_restrictions",
-            "N2_brief_reference", "N3_catalog_choice",
-        }
-        override_intents: Dict[str, str] = {
-            "recommend": "N3_catalog",
-            "catalog": "N3_catalog",
-            "greet": "N0_greet",
-            "greet_and_offer": "N0_greet",
-            "chosen_by_name": "N9_offer",
-            "complaint": "N11_complaint",
-            "urgent": "N5_urgent",
-            "corporate": "N12_escalation",
-            "faq": "N8_faq",
-            "pickup": "N7_pickup",
-            "occasion": "N2_brief",
-            "photo_request": "N13_photo",
-            "contact_owner": "N12_escalation",
-        }
-        if intent in override_intents and phase not in non_override_phases:
-            logger.info(
-                "INTENT OVERRIDE: intent=%s перехватывает фазу %s → %s uid=%s",
-                intent, phase, override_intents[intent],
-                state.get("user_id", "unknown"),
-            )
-            # Сбрасываем фазу на init, чтобы узел не думал что мы в середине диалога доставки
-            state["phase"] = "init"
-            return override_intents[intent]
-
-        # Если диалог уже идёт — идём в соответствующий обработчик
-        if phase != "init":
-            return self._phase_to_node_name(phase)
-
-        # Первый вход: по интенту
-        phase_map: Dict[str, str] = {
-            "greet_and_offer": "N0_greet",
-            "catalog": "N3_catalog",
-            "recommend": "N0_greet",
-            "chosen_by_name": "N9_offer",
-            "delivery_info": "N10_delivery",
-            "payment_info": "payment",
-            "complaint": "N11_complaint",
-            "urgent": "N5_urgent",
-            "corporate": "N12_escalation",
-            "occasion": "N2_brief",
-            "photo_request": "N13_photo",
-            "change_order": "N10_delivery",
-            "cancel_order": "N12_escalation",
-            "repeat_order": "N9_offer",
-            "contact_owner": "N12_escalation",
-            "faq": "N8_faq",
-            "pickup": "N7_pickup",
-            "scheduled": "N6_scheduled",
-            "reference": "N4_reference",
-            "status": "N12_escalation",
-            "unknown": "router",
-        }
-        return phase_map.get(intent, "router")
+        if phase == "init":
+            return "router"  # keyword fallback
+        return self._phase_to_node_name(phase)
 
     def _route_from_router(self, state: AgentState) -> str:
-        """Роутер N1: определение сценария при неопределённом интенте."""
-        text = state["user_input"].lower()
-        collected = state.get("collected_data", {})
-
-        # Проверка на самовывоз
-        if any(w in text for w in ("самовывоз", "заберу", "подъеду", "приеду")):
-            return "N7_pickup"
-
-        # Проверка на срочность
-        if any(w in text for w in ("срочн", "быстр", "побыстре", "через час", "asap")):
-            return "N5_urgent"
-
-        # Проверка на референс/фото
-        if any(w in text for w in ("референс", "пример", "как на фото", "сделайте так же")):
-            return "N4_reference"
-
-        # Проверка на каталог
-        if any(w in text for w in ("каталог", "что есть", "покажи", "посмотреть")):
-            return "N3_catalog"
-
-        # Проверка на жалобу
-        if any(w in text for w in ("завял", "не нравит", "жалоб", "недовол")):
-            return "N11_complaint"
-
-        # Проверка на ивент/корпоратив
-        if any(w in text for w in ("свадьб", "мероприяти", "корпоратив", "офис", "оптом")):
-            return "N12_escalation"
-
-        # Проверка на доставку
-        if any(w in text for w in ("достав", "привез", "адрес", "мкад")):
-            if collected.get("address"):
-                return "N10_delivery"
-            return "N10_delivery"
-
-        # Проверка на FAQ
-        if any(w in text for w in ("сколько", "цена", "минимальн", "оплата", "работа")):
-            return "N8_faq"
-
-        # По умолчанию — начало продажи
-        if collected.get("budget") or any(w in text for w in ("букет", "цвет", "хочу", "нужен")):
-            return "N2_brief"
-
-        return "N0_greet"
+        """Keyword-fallback роутер (срабатывает только если routing LLM недоступен)."""
+        return self._keyword_routing_fallback(state)
 
     # ──────────────────────────────────────────────
-    # NLU — LLM + Fallback
+    # NLU — structured routing + keyword fallback
     # ──────────────────────────────────────────────
 
-    def _predict_nlu_with_llm(self, state: AgentState) -> Dict[str, Any]:
-        if self.intent_llm is None:
-            return {"intent": "unknown", "entities": {}}
+    _ROUTING_PROMPT = """\
+Ты роутер диалогового агента цветочного магазина Flori Pacco.
+Определи следующую фазу и извлеки все сущности из сообщения клиента.
 
-        cache_key = state["user_input"].strip().lower()
+ТЕКУЩАЯ ФАЗА: {current_phase}
+СОБРАННЫЕ ДАННЫЕ: {collected_summary}
+
+ФАЗЫ И ПРАВИЛА:
+• N0_greet — начало разговора, приветствие без конкретного запроса
+• N2_brief — сбор брифа: бюджет, повод, получатель, формат, гамма, ограничения.
+  Оставайся здесь пока нет бюджета ИЛИ нет хотя бы одного пожелания
+• N3_catalog — клиент хочет посмотреть каталог, без прохождения брифа
+• N4_reference — клиент прислал ссылку/артикул/референс конкретного букета
+• N5_urgent — срочный заказ (через 1–2 часа)
+• N6_scheduled — заказ к точному времени/дате
+• N7_pickup — самовывоз из магазина
+• N8_faq — вопрос о правилах магазина: доставка, оплата, гарантии, минимальный заказ
+• N9_offer — показ 2–3 вариантов. Переходи сюда как только в брифе есть бюджет
+• N10_delivery — сбор данных доставки. Переходи когда клиент выбрал букет по имени или номеру
+• N11_complaint — жалоба на качество предыдущего заказа
+• N12_escalation — нужен оператор: корпоратив, конфликт, >30 000 ₽, отмена после сборки
+• payment — оплата. Переходи из N10_delivery когда адрес+дата+время собраны
+
+ПРИОРИТЕТЫ (всегда, независимо от текущей фазы):
+1. Жалоба на качество → N11_complaint
+2. "Позвать менеджера/оператора/владельца" → N12_escalation
+3. "Срочно / через час" → N5_urgent
+4. Самовывоз → N7_pickup
+5. Вопрос о правилах → N8_faq
+
+ИСТОРИЯ (последние сообщения):
+{history}
+
+СООБЩЕНИЕ КЛИЕНТА: {user_input}"""
+
+    def _predict_routing_decision(self, state: AgentState) -> Optional[NLUDecision]:
+        if self.routing_llm is None and self.intent_llm is None:
+            return None
+
+        current_phase = state.get("phase", "init")
+        cache_key = f"{state['user_input'].strip().lower()}::{current_phase}"
         if cache_key in self.nlu_cache:
-            return self.nlu_cache[cache_key]
+            cached = self.nlu_cache[cache_key]
+            if isinstance(cached, dict) and "next_phase" in cached:
+                try:
+                    return NLUDecision(**cached)
+                except Exception:
+                    pass
 
-        phase = state.get("phase", "init")
-        prompt = f"""
-Ты NLU-модуль для цветочного бота. Определи intent и сущности.
+        # Краткая сводка собранных данных
+        collected = state.get("collected_data", {})
+        parts = []
+        if collected.get("budget_max"):
+            parts.append(f"бюджет до {int(collected['budget_max'])}₽")
+        if collected.get("occasion"):
+            parts.append(f"повод: {collected['occasion']}")
+        if collected.get("bouquet_name"):
+            parts.append(f"букет: {collected['bouquet_name']}")
+        if collected.get("address"):
+            parts.append(f"адрес: {collected['address']}")
+        if collected.get("delivery_date"):
+            parts.append(f"дата: {collected['delivery_date']}")
+        if collected.get("delivery_time"):
+            parts.append(f"время: {collected['delivery_time']}")
+        collected_summary = ", ".join(parts) or "ничего"
 
-Доступные intent: greet, catalog, recommend, chosen_by_name, delivery_info, payment_info, complaint, urgent, occasion, photo_request, change_order, cancel_order, repeat_order, contact_owner, faq, unknown.
+        # Последние 6 сообщений без маркеров
+        history_lines = []
+        for msg in state["conversation_history"][-6:]:
+            role = "Клиент" if msg.get("role") == "user" else "Бот"
+            content = re.sub(r'\|\|[^|]+\|\|', '', msg.get("content", "")).strip()
+            if content:
+                history_lines.append(f"{role}: {content[:160]}")
+        history_text = "\n".join(history_lines) if history_lines else "Начало разговора"
 
-Правила извлечения:
-- Цены: "до X тыс" → max_price=X*1000, "от X тыс" → min_price=X*1000
-- delivery_date: дата доставки ("завтра", "15 июня", "15.06", "через 2 дня" — сохраняй как есть)
-- delivery_time: время доставки ("в 14:00", "в 14 часов", "после 18" — сохраняй как есть)
-- recipient_phone: телефон получателя (любой формат: +7..., 8..., 9... — сохраняй как есть)
-- address: адрес доставки
-
-Ответ JSON: {{"intent": "...", "entities": {{"max_price": null, "min_price": null, "name_query": null, "query_text": "...", "occasion": null, "urgent": null, "complaint_type": null, "photo_request": null, "product_type": null, "delivery_date": null, "delivery_time": null, "address": null, "recipient_phone": null, "gamma": null, "recipient": null, "card_text": null}}}}
-
-История: {state["full_conversation_text"]}
-
-Сообщение: {state["user_input"]}
-""".strip()
+        prompt = self._ROUTING_PROMPT.format(
+            current_phase=current_phase,
+            collected_summary=collected_summary,
+            history=history_text,
+            user_input=state["user_input"],
+        )
 
         try:
-            start_time = time.time()
-            llm_result = self.intent_llm.invoke(prompt)
-            end_time = time.time()
-            logger.info(f"LLM call took {end_time - start_time:.2f} seconds")
-            time.sleep(1)  # Rate limiting to avoid 429 errors
-            content = getattr(llm_result, "content", "") if llm_result is not None else ""
-            if isinstance(content, list):
-                content = " ".join(str(item) for item in content)
-            if not isinstance(content, str):
-                content = str(content)
+            start = time.time()
+            if self.routing_llm is not None:
+                result = self.routing_llm.invoke(prompt)
+            else:
+                # JSON fallback через intent_llm
+                raw = self.intent_llm.invoke(
+                    prompt + '\n\nОтвет строго в JSON: {"next_phase": "...", "max_price": null, ...}'
+                )
+                content = getattr(raw, "content", "") or ""
+                data = self._extract_first_json(str(content))
+                result = NLUDecision(**data) if data.get("next_phase") else None
 
-            payload = self._extract_first_json(content)
-            intent = self._normalize_intent(str(payload.get("intent", "")))
-            entities_raw = payload.get("entities", {}) if isinstance(payload, dict) else {}
-            if not isinstance(entities_raw, dict):
-                entities_raw = {}
+            logger.info("Routing LLM took %.2fs uid=%s", time.time() - start, state.get("user_id"))
+            time.sleep(0.5)
 
-            entities: Dict[str, Any] = {}
-            for key in (
-                "max_price", "min_price", "name_query", "query_text",
-                "occasion", "urgent", "complaint_type", "corporate_size",
-                "change_request", "photo_request", "repeat_reference",
-                "pickup", "product_type", "delivery_date", "delivery_time",
-                "address", "recipient_phone", "gamma", "recipient", "card_text",
-                "anonymous", "critical_flower", "critical_color",
-            ):
-                val = entities_raw.get(key)
-                if val is not None:
-                    entities[key] = val
-
-            # Нормализация цен
-            for price_key in ("max_price", "min_price"):
-                val = entities_raw.get(price_key)
-                if isinstance(val, (int, float)):
-                    entities[price_key] = float(val)
-                elif isinstance(val, str):
-                    try:
-                        entities[price_key] = float(val.replace(",", ".").strip())
-                    except ValueError:
-                        pass
-
-            logger.info(
-                "NLU LLM: intent=%s entities=%s %s",
-                intent, entities, self._user_context(state),
-            )
-            self.nlu_cache[cache_key] = {"intent": intent, "entities": entities}
-            return {"intent": intent, "entities": entities}
-
+            if isinstance(result, NLUDecision):
+                self.nlu_cache[cache_key] = result.model_dump()
+                logger.info("Routing: %s → %s uid=%s",
+                            current_phase, result.next_phase, state.get("user_id"))
+                return result
         except Exception as exc:
-            logger.exception("NLU LLM failed, fallback: %s", exc)
-            return {"intent": "unknown", "entities": {}}
+            logger.warning("Routing LLM failed: %s", exc)
 
-    def _fallback_intent_from_rules(self, state: AgentState) -> str:
+        return None
+
+
+    def _keyword_routing_fallback(self, state: AgentState) -> str:
+        """Минимальный keyword-роутер как аварийный fallback."""
         text = state["user_input"].lower()
-
-        has_greeting = any(m in text for m in ("привет", "здравствуйте", "добрый", "hello"))
-        has_greeting = any(m in text for m in ("привет", "здравствуй", "добрый", "доброе", "хай", "хелло", "hello", "hi"))
-        has_catalog = any(m in text for m in ("каталог", "все букеты", "покажи все", "ассортимент"))
-        has_flower = any(m in text for m in ("букет", "цвет", "роз", "пион", "тюльпан"))
-        has_delivery = any(m in text for m in ("достав", "привезти", "везете", "мкад"))
-        has_payment = any(m in text for m in ("оплат", "деньги", "перевод", "наличн", "карт"))
-        has_complaint = any(m in text for m in ("завял", "увял", "плох", "не нравит", "недовол", "жалоб"))
-        has_urgent = any(m in text for m in ("срочн", "быстр", "побыстре", "через час"))
-        has_corporate = any(m in text for m in ("корпоратив", "офис", "мероприятие", "свадьб", "оптом"))
-        has_occasion = any(m in text for m in ("день рожд", "юбилей", "мам", "любим", "девушк", "извин"))
-        has_photo = any(m in text for m in ("фото", "покажи", "пришли"))
-        has_change = any(m in text for m in ("измен", "поменя", "перенес", "передвин"))
-        has_cancel = any(m in text for m in ("отмен", "аннулир"))
-        has_repeat = any(m in text for m in ("повтор", "как в прошл", "еще раз", "снова"))
-        has_faq = any(m in text for m in ("минимальн", "сколько стоит", "гаранти", "анонимн", "открытк", "ваз"))
-        has_owner = any(m in text for m in ("позов", "владельц", "хозяин", "соедин", "менеджер"))
-        has_pickup = any(m in text for m in ("самовывоз", "заберу", "подъеду"))
-        has_reference = any(m in text for m in ("референс", "как на фото", "пример"))
-        has_more = any(m in text for m in ("больше", "ещё", "еще", "показать еще", "покажи еще", "дальше", "следующие"))
-        has_agreement = any(m in text for m in ("да", "хочу", "давай", "хорошо", "подходит", "ок", "согласен", "нравит", "го"))
-        has_dislike = any(m in text for m in ("не то", "не нравит", "другой", "не подходит", "нет"))
-
-        if has_cancel:
-            return "cancel_order"
-        if has_complaint:
-            return "complaint"
-        if has_owner:
-            return "contact_owner"
-        if has_urgent and has_flower:
-            return "urgent"
-        if has_corporate:
-            return "corporate"
-        if has_pickup:
-            return "pickup"
-        if has_reference:
-            return "reference"
-        if has_delivery:
-            return "delivery_info"
-        if has_payment:
-            return "payment_info"
-        if has_occasion:
-            return "occasion"
-        if has_repeat:
-            return "repeat_order"
-        if has_change:
-            return "change_order"
-        if has_photo and (has_flower or has_catalog):
-            return "photo_request"
-        if has_faq:
-            return "faq"
-        if has_catalog and has_greeting:
-            return "greet_and_offer"
-        if has_catalog:
-            return "catalog"
-        if has_greeting and has_flower:
-            return "greet_and_offer"
-        if has_greeting:
-            return "greet"
-        if has_flower:
-            return "recommend"
-        return "unknown"
+        if any(w in text for w in ("завял", "жалоб", "недовол", "плох")):
+            return "N11_complaint"
+        if any(w in text for w in ("корпоратив", "свадьб", "оптом", "менеджер", "владельц")):
+            return "N12_escalation"
+        if any(w in text for w in ("срочн", "через час")):
+            return "N5_urgent"
+        if any(w in text for w in ("самовывоз", "заберу")):
+            return "N7_pickup"
+        if any(w in text for w in ("достав", "адрес", "мкад")):
+            return "N10_delivery"
+        if any(w in text for w in ("каталог", "ассортимент")):
+            return "N3_catalog"
+        if any(w in text for w in ("сколько", "оплат", "гаранти", "минимальн")):
+            return "N8_faq"
+        if any(w in text for w in ("букет", "цвет", "хочу", "нужен")):
+            return "N2_brief"
+        if any(w in text for w in ("привет", "здравств", "добрый")):
+            return "N0_greet"
+        return "N0_greet"
 
     def _extract_price_from_text(self, text: str) -> Dict[str, Optional[float]]:
         result: Dict[str, Optional[float]] = {}
@@ -919,8 +827,10 @@ class FlowerLogic:
 
         collected = state.get("collected_data", {})
         entities = state.get("entities", {})
+        text_lower = state["user_input"].lower()
+        user_id = state.get("user_id")
 
-        # Сохраняем параметры
+        # Обновляем параметры из entities
         if entities.get("max_price"):
             collected["budget_max"] = entities["max_price"]
         if entities.get("min_price"):
@@ -930,10 +840,60 @@ class FlowerLogic:
         if entities.get("gamma"):
             collected["gamma"] = entities["gamma"]
 
+        # Если клиент выбрал букет по имени или позиции → переходим к доставке
+        if state.get("phase") == "N3_catalog_choice" and user_id is not None:
+            last = self._last_bouquets.get(user_id, [])
+            chosen = None
+
+            # Позиционный выбор
+            pos_map = {
+                0: ("первый", "1 вариант", "вариант 1"),
+                1: ("второй", "2 вариант", "вариант 2"),
+                2: ("третий", "3 вариант", "вариант 3"),
+                -1: ("последний",),
+            }
+            for idx, keywords in pos_map.items():
+                if any(kw in text_lower for kw in keywords):
+                    real_idx = idx if idx >= 0 else (len(last) - 1)
+                    if 0 <= real_idx < len(last):
+                        chosen = last[real_idx]
+                    break
+            if not chosen:
+                for idx in range(min(3, len(last))):
+                    if str(idx + 1) in text_lower.split():
+                        chosen = last[idx]
+                        break
+
+            # Поиск по имени в тексте
+            if not chosen and last:
+                name_query = entities.get("name_query", "")
+                if name_query:
+                    chosen = next(
+                        (b for b in last if name_query.lower() in b["Название"].lower()),
+                        None,
+                    )
+                if not chosen:
+                    chosen = next(
+                        (b for b in last if b["Название"].lower() in text_lower),
+                        None,
+                    )
+
+            if chosen:
+                collected["bouquet_name"] = chosen["Название"]
+                collected["bouquet_price"] = chosen["Цена"]
+                state["collected_data"] = collected
+                state["phase"] = "N10_delivery"
+                state["response"] = (
+                    f"Отлично, {chosen['Название']} — хороший выбор!\n\n"
+                    "Напишите, пожалуйста, адрес доставки."
+                )
+                state["response"] += f" ||phase:N10_delivery|| ||data:{json.dumps(collected, ensure_ascii=False)}||"
+                logger.info("N3_catalog: chosen '%s' → N10_delivery %s", chosen["Название"], self._user_context(state))
+                return state
+
         bouquets = state["bouquets_data"]
         filtered = list(bouquets)
 
-        # Фильтруем по бюджету
         max_price = collected.get("budget_max")
         min_price = collected.get("budget_min")
         if max_price:
@@ -941,21 +901,20 @@ class FlowerLogic:
         if min_price:
             filtered = [b for b in filtered if b["Цена"] >= min_price]
 
-        # Если нет фильтров — показываем все
+        # Нет фильтров — показываем категории
         if not max_price and not min_price:
-            # Группируем по ценовым категориям
             categories = [
-                ("До 5 000 ₽", [b for b in filtered if b["Цена"] <= 5000]),
-                ("5 000–10 000 ₽", [b for b in filtered if 5000 < b["Цена"] <= 10000]),
-                ("10 000–15 000 ₽", [b for b in filtered if 10000 < b["Цена"] <= 15000]),
-                ("15 000–20 000 ₽", [b for b in filtered if 15000 < b["Цена"] <= 20000]),
-                ("Свыше 20 000 ₽", [b for b in filtered if b["Цена"] > 20000]),
+                ("До 5 000 ₽",        [b for b in filtered if b["Цена"] <= 5000]),
+                ("5 000–10 000 ₽",    [b for b in filtered if 5000 < b["Цена"] <= 10000]),
+                ("10 000–15 000 ₽",   [b for b in filtered if 10000 < b["Цена"] <= 15000]),
+                ("15 000–20 000 ₽",   [b for b in filtered if 15000 < b["Цена"] <= 20000]),
+                ("Свыше 20 000 ₽",    [b for b in filtered if b["Цена"] > 20000]),
             ]
             lines = ["📋 Категории букетов:\n"]
             for name, items in categories:
                 if items:
                     lines.append(f"• {name} — {len(items)} {self._pluralize_variant(len(items))}")
-            lines.append("\nНапишите бюджет или название категории — покажу варианты.")
+            lines.append("\nНапишите бюджет — покажу варианты.")
             state["response"] = "\n".join(lines)
             state["phase"] = "N3_catalog_choice"
             state["collected_data"] = collected
@@ -963,29 +922,28 @@ class FlowerLogic:
             logger.info("N3_catalog: show categories %s", self._user_context(state))
             return state
 
-        # Показываем конкретные варианты
+        # Есть фильтр — показываем варианты
+        PAGE = 5
         sorted_b = sorted(filtered, key=lambda b: b["Цена"])
+        if user_id is not None:
+            self._last_bouquets[user_id] = sorted_b
+
         if sorted_b:
-            user_id = state.get("user_id")
-            if user_id is not None:
-                self._last_bouquets[user_id] = sorted_b
-            lines = ["Вот подходящие варианты:\n"]
-            for b in sorted_b[:5]:
-                lines.append(
-                    f"• {b['Название']} — {int(b['Цена'])} ₽\n"
-                    f"  {b['Ссылка']}"
-                )
-            if len(sorted_b) > 5:
-                lines.append(f"\nПоказано 5 из {len(sorted_b)} вариантов.")
-            lines.append("\nНапишите, какой понравился, и перейдём к оформлению доставки.")
+            lines = [f"Вот подходящие варианты ({len(sorted_b)} шт.):\n"]
+            for b in sorted_b[:PAGE]:
+                lines.append(f"• {b['Название']} — {int(b['Цена'])} ₽\n  {b['Ссылка']}")
+            lines.append("\nНапишите название или номер понравившегося — перейдём к оформлению.")
             state["response"] = "\n".join(lines)
+            if len(sorted_b) > PAGE:
+                remaining = min(PAGE, len(sorted_b) - PAGE)
+                state["response"] += f" ||more:{remaining}:{PAGE}||"
         else:
             state["response"] = "К сожалению, в этом диапазоне ничего не нашлось."
 
         state["phase"] = "N3_catalog_choice"
         state["collected_data"] = collected
         state["response"] += f" ||phase:N3_catalog_choice|| ||data:{json.dumps(collected, ensure_ascii=False)}||"
-        logger.info("N3_catalog: show items %s", self._user_context(state))
+        logger.info("N3_catalog: show %d items %s", len(sorted_b), self._user_context(state))
         return state
 
     # ──────────────────────────────────────────────
@@ -1437,10 +1395,14 @@ class FlowerLogic:
         lines.append("\nКакой вариант больше нравится? Или хотите что-то поменять?")
 
         state["response"] = "\n".join(lines)
+        # Кнопка "Показать ещё" если вариантов больше 3
+        if len(filtered_sorted) > 3:
+            remaining = min(3, len(filtered_sorted) - 3)
+            state["response"] += f" ||more:{remaining}:3||"
         state["phase"] = "N9_offer"
         state["collected_data"] = collected
         state["response"] += f" ||phase:N9_offer|| ||data:{json.dumps(collected, ensure_ascii=False)}||"
-        logger.info("N9_offer: %d options presented %s", len(unique_picks), self._user_context(state))
+        logger.info("N9_offer: %d options presented (total=%d) %s", len(unique_picks), len(filtered_sorted), self._user_context(state))
         return state
 
     def _N9_confirm_node(self, state: AgentState) -> AgentState:

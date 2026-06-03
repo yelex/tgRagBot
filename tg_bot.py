@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Set
 from dotenv import load_dotenv
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -388,13 +388,16 @@ class TelegramBot:
         """
         # Очищаем от служебных маркеров
         clean_text, kb_list, _ = self._clean_response(text)
-        # Если reply_markup ещё не передан, а kb_list есть — создаём ReplyKeyboardMarkup
-        if reply_markup is None and kb_list:
-            reply_markup = ReplyKeyboardMarkup(
-                [[KeyboardButton(opt)] for opt in kb_list],
-                resize_keyboard=True,
-                one_time_keyboard=True,
-            )
+        if reply_markup is None:
+            if kb_list:
+                reply_markup = ReplyKeyboardMarkup(
+                    [[KeyboardButton(opt)] for opt in kb_list],
+                    resize_keyboard=True,
+                    one_time_keyboard=True,
+                )
+            else:
+                # Явно убираем предыдущую клавиатуру
+                reply_markup = ReplyKeyboardRemove()
 
         # Для URL внутри текста: ищем букет
         first_bouquet = self._find_first_bouquet(clean_text)
