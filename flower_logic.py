@@ -384,6 +384,11 @@ class FlowerLogic:
 ТЕКУЩАЯ ФАЗА: {current_phase}
 СОБРАННЫЕ ДАННЫЕ: {collected_summary}
 
+ПРАВИЛА ИЗВЛЕЧЕНИЯ БЮДЖЕТА:
+• "X рублей" / "X тысяч" без слова "от" → max_price=X (не min_price!)
+• "от X рублей" / "не меньше X" → min_price=X
+• "от X до Y" → min_price=X, max_price=Y
+
 ФАЗЫ И ПРАВИЛА:
 • N0_greet — начало разговора, приветствие без конкретного запроса
 • N2_brief — сбор брифа: бюджет, повод, получатель, формат, гамма, ограничения.
@@ -552,69 +557,35 @@ class FlowerLogic:
     def _N0_greet_node(self, state: AgentState) -> AgentState:
         logger.info("Agent node enter: N0_greet %s", self._user_context(state))
 
-        # Если пользователь уже ответил на приветствие
-        if state["phase"] != "init":
-            collected = state.get("collected_data", {})
-            intent = state.get("intent", "unknown")
-            text = state["user_input"].lower()
+        # Определяем: уже показывали приветствие или нет
+        # (проверяем историю, а не phase из state — новый рутер всегда ставит phase=N0_greet)
+        already_greeted = self._extract_phase_from_history(state) == "N0_greet"
 
-            # Если пользователь сказал что хочет — переходим в N2_brief
-            if intent in ("recommend", "catalog", "greet_and_offer") or \
-               any(w in text for w in ("букет", "цветы", "хочу", "нужен", "подбери")):
-                state["phase"] = "N2_brief"
-                state["response"] = "Отлично! Давайте подберём букет."
-                return self._N2_brief_node(state)
-
-            # Если спросил про доставку
-            if "достав" in text or "мкад" in text:
-                state["phase"] = "N10_delivery"
-                return self._N10_delivery_node(state)
-
-            # Если спросил про оплату
-            if any(w in text for w in ("оплат", "деньги", "перевод")):
-                state["phase"] = "payment"
-                return self._payment_node(state)
-
-            # Если срочно
-            if any(w in text for w in ("срочн", "быстр", "asap")):
-                state["phase"] = "N5_urgent"
-                return self._N5_urgent_node(state)
-
-            # Если хочет каталог
-            if any(w in text for w in ("каталог", "покажи", "что есть")):
-                state["phase"] = "N3_catalog"
-                return self._N3_catalog_node(state)
-
-            # Общая реакция — спрашиваем пожелания, а не сразу бюджет
+        if already_greeted:
+            # Клиент отвечает на наше приветствие — переходим к брифу
             state["phase"] = "N2_brief"
-            state["response"] = (
-                "Подскажите, какие у Вас пожелания к букету?\n"
-                "Например: повод, любимые цветы, цветовая гамма, бюджет."
-            )
-            state["response"] += " ||phase:N2_brief_budget||"
-            logger.info("N0_greet → N2_brief (general wishes) %s", self._user_context(state))
-            return state
+            state["response"] = "Отлично! Давайте подберём букет."
+            logger.info("N0_greet → N2_brief (response to greeting) %s", self._user_context(state))
+            return self._N2_brief_node(state)
 
         # Первое приветствие
-        state["phase"] = "N0_greet"
         state["collected_data"] = {}
-
-        # Если есть бюджет от NLU — сразу в N2_brief
         entities = state.get("entities", {})
+
+        # Если в первом сообщении уже есть бюджет — не тратим время на приветствие
         if entities.get("max_price") or entities.get("min_price"):
             state["phase"] = "N2_brief"
-            state["response"] = "Здравствуйте! Сразу к делу — давайте подберём букет."
+            state["response"] = "Здравствуйте! Отлично, давайте сразу подберём букет."
             state["response"] += " ||phase:N2_brief_budget||"
-            logger.info("N0_greet → N2_brief (has budget) %s", self._user_context(state))
+            logger.info("N0_greet → N2_brief (has budget in first msg) %s", self._user_context(state))
             return state
 
         state["response"] = (
-            "🌸 Добрый день! Рады приветствовать в нашей цветочной мастерской.\n\n"
-            "Подскажите, пожалуйста:\n"
-            "• Какой букет/композиция/коробка вас интересует?\n"
-            "• Какие будут пожелания?\n\n"
-            "Или просто напишите бюджет — подберём варианты."
+            "Добрый день! Рады приветствовать в Flori Pacco.\n\n"
+            "Помогу подобрать идеальный букет — напишите ваши пожелания.\n"
+            "Например: повод, кому, бюджет, любимые цветы."
         )
+        state["phase"] = "N0_greet"
         state["response"] += " ||phase:N0_greet|| ||data:{}||"
         logger.info("N0_greet — first greeting %s", self._user_context(state))
         return state
@@ -1314,6 +1285,11 @@ class FlowerLogic:
 
         max_price = collected.get("budget_max") or entities.get("max_price")
         min_price = collected.get("budget_min") or entities.get("min_price")
+
+        # Если только min_price без max_price — клиент назвал бюджет без "от",
+        # трактуем как целевой бюджет ± 10%
+        if min_price and not max_price:
+            min_price, max_price = self._normalize_budget_range(min_price, None)
 
         # Фильтруем по бюджету
         filtered = list(bouquets)
