@@ -469,9 +469,14 @@ class FlowerLogic:
 
 Доступные intent: greet, catalog, recommend, chosen_by_name, delivery_info, payment_info, complaint, urgent, occasion, photo_request, change_order, cancel_order, repeat_order, contact_owner, faq, unknown.
 
-Извлечение цен: "до X тыс" → max_price=X*1000, "от X тыс" → min_price=X*1000.
+Правила извлечения:
+- Цены: "до X тыс" → max_price=X*1000, "от X тыс" → min_price=X*1000
+- delivery_date: дата доставки ("завтра", "15 июня", "15.06", "через 2 дня" — сохраняй как есть)
+- delivery_time: время доставки ("в 14:00", "в 14 часов", "после 18" — сохраняй как есть)
+- recipient_phone: телефон получателя (любой формат: +7..., 8..., 9... — сохраняй как есть)
+- address: адрес доставки
 
-Ответ JSON: {{"intent": "...", "entities": {{"max_price": null, "min_price": null, "name_query": null, "query_text": "...", "occasion": null, "urgent": null, "complaint_type": null, "photo_request": null, "product_type": null, "delivery_time": null, "address": null, "gamma": null, "recipient": null, "card_text": null}}}}
+Ответ JSON: {{"intent": "...", "entities": {{"max_price": null, "min_price": null, "name_query": null, "query_text": "...", "occasion": null, "urgent": null, "complaint_type": null, "photo_request": null, "product_type": null, "delivery_date": null, "delivery_time": null, "address": null, "recipient_phone": null, "gamma": null, "recipient": null, "card_text": null}}}}
 
 История: {state["full_conversation_text"]}
 
@@ -502,9 +507,9 @@ class FlowerLogic:
                 "max_price", "min_price", "name_query", "query_text",
                 "occasion", "urgent", "complaint_type", "corporate_size",
                 "change_request", "photo_request", "repeat_reference",
-                "pickup", "product_type", "delivery_time", "address",
-                "gamma", "recipient", "card_text", "anonymous",
-                "critical_flower", "critical_color",
+                "pickup", "product_type", "delivery_date", "delivery_time",
+                "address", "recipient_phone", "gamma", "recipient", "card_text",
+                "anonymous", "critical_flower", "critical_color",
             ):
                 val = entities_raw.get(key)
                 if val is not None:
@@ -1459,81 +1464,131 @@ class FlowerLogic:
 
         collected = state.get("collected_data", {})
         entities = state.get("entities", {})
-        text = state["user_input"].lower()
+        text = state["user_input"]
+        text_lower = text.lower()
 
-        # Сохраняем адрес
+        # ── Извлекаем все поля из entities и текста ──────────────────────────
         if entities.get("address"):
             collected["address"] = entities["address"]
         if not collected.get("address"):
-            # Пробуем извлечь адрес из текста
-            addr_match = re.search(
-                r'(?:адрес|по адресу|на? )([а-яА-ЯёЁ\s\d.,/-]{5,})',
-                text
-            )
-            if addr_match:
-                collected["address"] = addr_match.group(1).strip()
+            m = re.search(r'(?:адрес|по адресу|на? )([а-яА-ЯёЁ\s\d.,/-]{5,})', text_lower)
+            if m:
+                collected["address"] = m.group(1).strip()
 
-        # Проверка на признаки "за МКАД"
-        beyond_mkad = any(w in text for w in (
+        if entities.get("delivery_date"):
+            collected["delivery_date"] = entities["delivery_date"]
+
+        if entities.get("delivery_time"):
+            collected["delivery_time"] = entities["delivery_time"]
+        if not collected.get("delivery_time"):
+            m = re.search(r'(?:в\s)?(\d{1,2}[:.]\d{2}|\d{1,2}\s*ч(?:ас)?)', text_lower)
+            if m:
+                collected["delivery_time"] = m.group(0).strip()
+
+        if entities.get("recipient_phone"):
+            collected["recipient_phone"] = entities["recipient_phone"]
+        if not collected.get("recipient_phone"):
+            phone = self._extract_phone_from_text(text)
+            if phone:
+                collected["recipient_phone"] = phone
+
+        # ── Шаг 1: адрес ─────────────────────────────────────────────────────
+        if not collected.get("address"):
+            state["collected_data"] = collected
+            state["phase"] = "N10_delivery"
+            state["response"] = "Напишите, пожалуйста, адрес доставки полностью."
+            return self._wrap_response(state)
+
+        # ── За МКАД: уточняем км ──────────────────────────────────────────────
+        beyond_mkad = any(w in text_lower for w in (
             "за мкад", "замкад", "область", "московская область",
             "подмосковье", "за город",
         ))
-
         if beyond_mkad and not collected.get("beyond_km"):
-            # Спрашиваем километраж для расчёта
             state["collected_data"] = collected
-            state["response"] = (
-                "Доставка за МКАД рассчитывается: 1 000 ₽ + 50 ₽ за каждый км от МКАД.\n\n"
-                "Подскажите примерное расстояние от МКАД (в км)?\n"
-                "Или назовите район/город — посчитаем."
-            )
             state["phase"] = "N10_delivery"
-            state["response"] += " ||phase:N10_delivery||"
-            logger.info("N10_delivery: ask km for beyond MKAD %s", self._user_context(state))
+            state["response"] = (
+                "Доставка за МКАД: 1 000 ₽ + 50 ₽/км от МКАД.\n\n"
+                "Подскажите примерное расстояние от МКАД в км?\n"
+                "Или назовите район — посчитаем."
+            )
             return self._wrap_response(state)
 
-        # Если есть км за МКАД — считаем по формуле
+        # ── Расчёт стоимости доставки ─────────────────────────────────────────
         if beyond_mkad and collected.get("beyond_km"):
             km = collected["beyond_km"]
             delivery_price = DELIVERY_BEYOND_BASE + DELIVERY_BEYOND_PER_KM * km
             delivery_line = f"🚚 Доставка: {int(delivery_price):,} ₽ (за МКАД, {int(km)} км)"
         else:
-            # Внутри МКАД
             total = collected.get("budget_max") or 0
             delivery_price = 0 if total >= FREE_DELIVERY_THRESHOLD else DELIVERY_MKAD_PRICE
-            delivery_line = "🚚 Доставка: 0 ₽ (бесплатно при заказе от 20 000 ₽)" \
-                if delivery_price == 0 else f"🚚 Доставка: {delivery_price} ₽ (МКАД)"
-
-        if not collected.get("address"):
-            state["response"] = (
-                "Для расчёта доставки напишите, пожалуйста, адрес полностью."
+            delivery_line = (
+                "🚚 Доставка: бесплатно (заказ от 20 000 ₽)"
+                if delivery_price == 0
+                else f"🚚 Доставка: {delivery_price} ₽"
             )
-            state["phase"] = "N10_delivery"
+        collected["delivery_cost"] = delivery_price
+
+        # ── Шаг 2: дата ──────────────────────────────────────────────────────
+        if not collected.get("delivery_date"):
             state["collected_data"] = collected
-            state["response"] += " ||phase:N10_delivery||"
-            logger.info("N10_delivery: ask address %s", self._user_context(state))
+            state["phase"] = "N10_delivery"
+            state["keyboard"] = ["Сегодня", "Завтра", "Другая дата"]
+            state["response"] = "На какую дату нужна доставка?"
             return self._wrap_response(state)
 
-        # Адрес есть — сохраняем delivery_cost, создаём/обновляем заказ в БД
-        collected["delivery_cost"] = delivery_cost
+        # ── Шаг 3: время ─────────────────────────────────────────────────────
+        if not collected.get("delivery_time"):
+            state["collected_data"] = collected
+            state["phase"] = "N10_delivery"
+            state["response"] = (
+                "В какое время доставить?\n\n"
+                "Доставка работает 24/7. Срочная — от 1,5 часов.\n"
+                "Ночная (23:00–09:00) — только заранее оформленные."
+            )
+            return self._wrap_response(state)
+
+        # ── Шаг 4: телефон получателя ────────────────────────────────────────
+        if not collected.get("recipient_phone") and not collected.get("phone_skipped"):
+            state["collected_data"] = collected
+            state["phase"] = "N10_delivery"
+            state["keyboard"] = ["Не знаю телефон"]
+            state["response"] = (
+                "📞 Телефон получателя?\n\n"
+                "Нужен на случай, если курьер не найдёт адрес.\n"
+                "Если не знаете — нажмите «Не знаю телефон»."
+            )
+            return self._wrap_response(state)
+
+        # Если клиент нажал «Не знаю телефон»
+        if "не знаю" in text_lower or "не знаю телефон" in text_lower:
+            collected["phone_skipped"] = True
+            collected["recipient_phone"] = None
+
+        # ── Всё собрано → сводка → payment ───────────────────────────────────
         state["collected_data"] = collected
         state = self._upsert_order(state)
         collected = state["collected_data"]
 
         order_id = collected.get("order_id", "—")
+        bouquet_line = f"💐 {collected['bouquet_name']}" if collected.get("bouquet_name") else "💐 Букет"
+        phone_line = collected.get("recipient_phone") or "не указан"
+
         state["response"] = (
+            f"📋 Детали заказа #{order_id}:\n\n"
+            f"{bouquet_line}\n"
+            f"📍 {collected['address']}\n"
+            f"📅 {collected['delivery_date']}\n"
+            f"⏰ {collected['delivery_time']}\n"
+            f"📞 Получатель: {phone_line}\n"
             f"{delivery_line}\n\n"
-            "📋 Подтвердите детали заказа:\n"
-            f"📍 Адрес: {collected['address']}\n"
-            "⏰ Время: уточним\n\n"
-            "⏱ Курьер ожидает 15 минут бесплатно, далее 100 ₽ за каждые 10 минут.\n\n"
-            f"Номер заказа: #{order_id}\n\n"
+            "⏱ Курьер ожидает 15 мин бесплатно, далее 100 ₽/10 мин.\n\n"
             "Всё верно? Переходим к оплате?"
         )
         state["phase"] = "payment"
         state["collected_data"] = collected
         state["response"] += f" ||phase:payment|| ||data:{json.dumps(collected, ensure_ascii=False)}||"
-        logger.info("N10_delivery: address collected → payment %s", self._user_context(state))
+        logger.info("N10_delivery: all data collected → payment %s", self._user_context(state))
         return state
 
     # ──────────────────────────────────────────────
@@ -1830,6 +1885,12 @@ class FlowerLogic:
         if keyboard:
             state["response"] += f" ||keyboard:{json.dumps(keyboard, ensure_ascii=False)}||"
         return state
+
+    @staticmethod
+    def _extract_phone_from_text(text: str) -> Optional[str]:
+        """Ищет телефонный номер в произвольном тексте."""
+        m = re.search(r'(\+7|8|7)[\s\-]?\(?\d{3}\)?[\s\-]?\d{3}[\s\-]?\d{2}[\s\-]?\d{2}', text)
+        return m.group(0).strip() if m else None
 
     def _upsert_order(self, state: AgentState) -> AgentState:
         """Создаёт заказ в БД при первом вызове, обновляет при повторном.
