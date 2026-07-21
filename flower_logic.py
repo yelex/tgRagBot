@@ -1,3 +1,4 @@
+import difflib
 import json
 import logging
 import os
@@ -13,6 +14,7 @@ from langgraph.graph import END, START, StateGraph
 
 from interfaces import mysql_interface
 from interfaces.mysql_interface import create_order, update_order, get_active_order
+from state_checklist import MIN_ORDER_AMOUNT, is_below_minimum, is_node_complete, missing_fields
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -83,6 +85,17 @@ ALLOWED_INTENTS = {
     "pickup", "scheduled", "reference", "status",
 }
 
+# Узлы, в которые роутер может перепрыгнуть из любой фазы немедленно —
+# это тематические переключения (жалоба, эскалация, срочно...), а не шаги
+# последовательного сбора данных. Для остальных узлов см. REQUIRED_FIELDS
+# в state_checklist.py: переход разрешён только когда обязательные поля
+# текущей фазы заполнены (иначе роутер может пропустить N10_delivery и
+# т.п., см. docs/TESTING.md, баг P1).
+INTERRUPT_NODES = {
+    "N11_complaint", "N12_escalation", "N5_urgent", "N7_pickup",
+    "N8_faq", "N4_reference",
+}
+
 ALLOWED_PHASES = {
     "init", "N0_greet", "N1_router", "N2_brief_budget", "N2_brief_occasion",
     "N2_brief_format", "N2_brief_gamma", "N2_brief_restrictions",
@@ -92,6 +105,41 @@ ALLOWED_PHASES = {
     "N11_complaint_facts", "N12_escalated", "N13_photo_approval",
     "N14_delivery_exec", "N15_close", "payment",
 }
+
+
+def _find_bouquet_fuzzy(
+    query: Optional[str],
+    catalog: List[Dict[str, Any]],
+    preferred: Optional[List[Dict[str, Any]]] = None,
+) -> Optional[Dict[str, Any]]:
+    """Ищет букет по тексту: точное вхождение, затем fuzzy по названию.
+
+    Не полагается только на то, что LLM-роутер верно извлёк name_query
+    (см. P2 в docs/TESTING.md) — принимает любой текст (в т.ч. сырое
+    сообщение клиента) и ищет сначала в preferred (последний показанный
+    список), затем во всём каталоге.
+    """
+    query = (query or "").strip().lower()
+    if not query:
+        return None
+    for pool in (preferred or [], catalog):
+        if not pool:
+            continue
+        match = next((b for b in pool if query in b["Название"].lower()), None)
+        if match:
+            return match
+        # Fuzzy по отдельным словам названия (не по всей строке) — иначе
+        # короткий query ("модена") никогда не наберёт нужный cutoff против
+        # длинного полного названия ("Букет Модена").
+        best, best_ratio = None, 0.0
+        for b in pool:
+            for word in b["Название"].lower().split():
+                ratio = difflib.SequenceMatcher(None, query, word).ratio()
+                if ratio > best_ratio:
+                    best, best_ratio = b, ratio
+        if best_ratio >= 0.75:
+            return best
+    return None
 
 
 class FlowerLogic:
@@ -270,6 +318,20 @@ class FlowerLogic:
             return intent
         return "unknown"
 
+    _NULL_LIKE_STRINGS = {"null", "none", "nan", "нет", "нет данных", "н/д", "-", ""}
+
+    @classmethod
+    def _is_real_value(cls, v: Any) -> bool:
+        """GigaChat structured output иногда возвращает строку 'null' вместо
+        настоящего None для незаполненных полей — такая строка truthy и без
+        этой проверки просачивается в collected_data как "телефон известен"
+        и т.п. (см. docs/TESTING.md, P1 — вторичный эффект)."""
+        if v is None:
+            return False
+        if isinstance(v, str) and v.strip().lower() in cls._NULL_LIKE_STRINGS:
+            return False
+        return True
+
     def _extract_phase_from_history(self, state: AgentState) -> Optional[str]:
         """Извлекает фазу из метаданных последнего ответа ассистента."""
         for item in reversed(state["conversation_history"]):
@@ -311,7 +373,7 @@ class FlowerLogic:
         if decision is not None:
             entities: Dict[str, Any] = {
                 k: v for k, v in decision.model_dump().items()
-                if k != "next_phase" and v is not None
+                if k != "next_phase" and self._is_real_value(v)
             }
             # Price regex fallback поверх LLM (на случай неточности)
             for key, val in self._extract_price_from_text(state["user_input"]).items():
@@ -327,7 +389,18 @@ class FlowerLogic:
                 predicted_node = self._phase_to_node_name(predicted)
                 # Если LLM предлагает тот же узел — сохраняем под-фазу (N2_brief_gamma и т.п.)
                 if predicted_node != current_node:
-                    state["phase"] = predicted
+                    if predicted_node in INTERRUPT_NODES or is_node_complete(current_node, state["collected_data"]):
+                        state["phase"] = predicted
+                    else:
+                        # P1: не даём роутеру перепрыгнуть последовательную фазу
+                        # (например N10_delivery → payment), пока сам узел не
+                        # подтвердит, что обязательные условия выполнены.
+                        logger.info(
+                            "Routing guard: держим %s (не хватает %s), LLM предлагал %s %s",
+                            current_node,
+                            missing_fields(current_node, state["collected_data"]) or "phone step",
+                            predicted_node, self._user_context(state),
+                        )
             logger.info(
                 "NLU structured: next=%s entities=%s %s",
                 decision.next_phase, list(entities.keys()), self._user_context(state),
@@ -392,7 +465,7 @@ class FlowerLogic:
 Определи следующую фазу и извлеки все сущности из сообщения клиента.
 
 ТЕКУЩАЯ ФАЗА: {current_phase}
-СОБРАННЫЕ ДАННЫЕ: {collected_summary}
+СОБРАННЫЕ ДАННЫЕ: {collected_summary}{missing_note}
 
 ПРАВИЛА ИЗВЛЕЧЕНИЯ СПОСОБА ОПЛАТЫ (payment_method):
 • Юрлицо / реквизиты / счёт / договор / ИНН / ООО / ИП / безнал / накладная → 'legal_entity'
@@ -471,6 +544,11 @@ class FlowerLogic:
             parts.append(f"время: {collected['delivery_time']}")
         collected_summary = ", ".join(parts) or "ничего"
 
+        # Явный список недостающих полей текущей фазы (не полагаемся на то,
+        # что LLM сам выведет это из истории чата — источник бага P1)
+        still_missing = missing_fields(self._phase_to_node_name(current_phase), collected)
+        missing_note = f"; НЕ ХВАТАЕТ: {', '.join(still_missing)}" if still_missing else ""
+
         # Последние 6 сообщений без маркеров
         history_lines = []
         for msg in state["conversation_history"][-6:]:
@@ -483,6 +561,7 @@ class FlowerLogic:
         prompt = self._ROUTING_PROMPT.format(
             current_phase=current_phase,
             collected_summary=collected_summary,
+            missing_note=missing_note,
             history=history_text,
             user_input=state["user_input"],
         )
@@ -1318,11 +1397,11 @@ class FlowerLogic:
                             break
 
         chosen = positional_match
-        if not chosen and name_query and state.get("phase") == "N9_offer":
-            chosen = next(
-                (b for b in bouquets if name_query.lower() in b["Название"].lower()),
-                None,
-            )
+        if not chosen and state.get("phase") == "N9_offer":
+            preferred = self._last_bouquets.get(user_id, []) if user_id is not None else []
+            chosen = _find_bouquet_fuzzy(name_query, bouquets, preferred)
+            if not chosen:
+                chosen = _find_bouquet_fuzzy(state["user_input"], bouquets, preferred)
 
         if chosen and state.get("phase") == "N9_offer":
             match = chosen
@@ -1349,6 +1428,23 @@ class FlowerLogic:
         # трактуем как целевой бюджет ± 10%
         if min_price and not max_price:
             min_price, max_price = self._normalize_budget_range(min_price, None)
+
+        # P3: бюджет ниже минимального заказа — не показываем каталог,
+        # возвращаем клиента к уточнению бюджета
+        if max_price and is_below_minimum({"budget_max": max_price}):
+            collected["budget_max"] = max_price
+            if min_price:
+                collected["budget_min"] = min_price
+            state["collected_data"] = collected
+            state["phase"] = "N2_brief_budget"
+            min_amount_str = f"{MIN_ORDER_AMOUNT:,}".replace(",", " ")
+            state["response"] = (
+                f"Минимальный заказ у нас — {min_amount_str} ₽. "
+                "Подскажите, пожалуйста, актуальный бюджет от этой суммы?"
+            )
+            state["response"] += f" ||phase:N2_brief_budget|| ||data:{json.dumps(collected, ensure_ascii=False)}||"
+            logger.info("N9_offer: бюджет %.0f ниже минимума %s", max_price, self._user_context(state))
+            return state
 
         # Фильтруем по бюджету
         filtered = list(bouquets)
@@ -1490,16 +1586,18 @@ class FlowerLogic:
         text = state["user_input"]
         text_lower = text.lower()
 
-        # Б2: если букет ещё не выбран, пробуем найти по name_query или позиции
+        # Б2/P2: если букет ещё не выбран, ищем сначала по name_query
+        # (если LLM его извлёк), затем по сырому тексту сообщения —
+        # не полагаемся только на успешное извлечение сущности LLM
         if not collected.get("bouquet_name"):
-            name_q = (entities.get("name_query") or "").lower()
-            if name_q:
-                last = self._last_bouquets.get(user_id if (user_id := state.get("user_id")) else -1, [])
-                candidates = last or state["bouquets_data"]
-                match = next((b for b in candidates if name_q in b["Название"].lower()), None)
-                if match:
-                    collected["bouquet_name"] = match["Название"]
-                    collected["bouquet_price"] = match["Цена"]
+            user_id = state.get("user_id")
+            preferred = self._last_bouquets.get(user_id, []) if user_id is not None else []
+            match = _find_bouquet_fuzzy(entities.get("name_query"), state["bouquets_data"], preferred)
+            if not match:
+                match = _find_bouquet_fuzzy(text, state["bouquets_data"], preferred)
+            if match:
+                collected["bouquet_name"] = match["Название"]
+                collected["bouquet_price"] = match["Цена"]
 
         # ── Извлекаем все поля из entities и текста ──────────────────────────
         if entities.get("address"):
@@ -1582,6 +1680,13 @@ class FlowerLogic:
             )
             return self._wrap_response(state)
 
+        # Если клиент нажал «Не знаю телефон» — обрабатываем ДО повторного
+        # запроса телефона ниже, иначе шаг 4 переспрашивает по кругу и
+        # никогда не доходит до сводки (см. docs/TESTING.md, P1)
+        if "не знаю" in text_lower:
+            collected["phone_skipped"] = True
+            collected["recipient_phone"] = None
+
         # ── Шаг 4: телефон получателя ────────────────────────────────────────
         if not collected.get("recipient_phone") and not collected.get("phone_skipped"):
             state["collected_data"] = collected
@@ -1593,11 +1698,6 @@ class FlowerLogic:
                 "Если не знаете — нажмите «Не знаю телефон»."
             )
             return self._wrap_response(state)
-
-        # Если клиент нажал «Не знаю телефон»
-        if "не знаю" in text_lower or "не знаю телефон" in text_lower:
-            collected["phone_skipped"] = True
-            collected["recipient_phone"] = None
 
         # ── Всё собрано → сводка → payment ───────────────────────────────────
         state["collected_data"] = collected
